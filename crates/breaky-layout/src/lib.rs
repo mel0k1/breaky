@@ -77,6 +77,7 @@ struct Flow {
     x: f32,
     y: f32,
     width: f32,
+    height: f32,
 }
 
 #[derive(Clone, Copy)]
@@ -100,6 +101,7 @@ pub fn layout<'a>(styled: &'a StyledNode<'a>, viewport_width: f32) -> Option<Lay
             x: 0.0,
             y: 0.0,
             width: viewport_width,
+            height: 0.0,
         },
         BASE_FONT,
     );
@@ -265,6 +267,11 @@ impl<'a> LayoutBox<'a> {
         {
             Some(Value::Length(n, Unit::Px)) => *n,
             Some(Value::Length(n, Unit::Em)) => n * parent,
+            Some(Value::Keyword(k)) => k
+                .trim_end_matches('%')
+                .parse::<f32>()
+                .map(|p| p * parent / 100.0)
+                .unwrap_or(parent),
             _ => parent,
         }
     }
@@ -278,6 +285,7 @@ impl<'a> LayoutBox<'a> {
             Some(Value::Length(n, Unit::Px)) => *n,
             Some(Value::Length(n, Unit::Em)) => n * font,
             Some(Value::Keyword(k)) => k
+                .trim_end_matches('%')
                 .parse::<f32>()
                 .map(|m| m * font)
                 .unwrap_or(font * 1.2),
@@ -285,12 +293,12 @@ impl<'a> LayoutBox<'a> {
         }
     }
 
-    fn num(&self, key: &str, font: f32) -> Option<f32> {
-        px(self.element()?.computed.get(key)?.first()?, font)
+    fn num(&self, key: &str, font: f32, base: f32) -> Option<f32> {
+        len_or(self.element()?.computed.get(key)?.first()?, font, base)
     }
 
-    fn edges(&self, family: Family, font: f32) -> Edges {
-        let mut base = self.shorthand_base(family, font);
+    fn edges(&self, family: Family, font: f32, base: f32) -> Edges {
+        let mut base4 = self.shorthand_base(family, font, base);
         let sides = ["top", "right", "bottom", "left"];
         let mut e = Edges::default();
         for (i, side) in sides.iter().enumerate() {
@@ -299,8 +307,8 @@ impl<'a> LayoutBox<'a> {
                 Family::Padding => format!("padding-{}", side),
                 Family::Border => format!("border-{}-width", side),
             };
-            if let Some(v) = self.num(&long, font) {
-                base[i] = Some(v);
+            if let Some(v) = self.num(&long, font, base) {
+                base4[i] = Some(v);
             } else if matches!(family, Family::Border) {
                 let side_key = format!("border-{}", side);
                 if let Some(v) = self
@@ -308,10 +316,10 @@ impl<'a> LayoutBox<'a> {
                     .and_then(|s| s.computed.get(&side_key))
                     .and_then(|vals| vals.iter().filter_map(|t| px(t, font)).next())
                 {
-                    base[i] = Some(v);
+                    base4[i] = Some(v);
                 }
             }
-            let v = base[i].unwrap_or(0.0);
+            let v = base4[i].unwrap_or(0.0);
             match i {
                 0 => e.top = v,
                 1 => e.right = v,
@@ -322,7 +330,7 @@ impl<'a> LayoutBox<'a> {
         e
     }
 
-    fn shorthand_base(&self, family: Family, font: f32) -> [Option<f32>; 4] {
+    fn shorthand_base(&self, family: Family, font: f32, base: f32) -> [Option<f32>; 4] {
         let keys: &[&str] = match family {
             Family::Margin => &["margin"],
             Family::Padding => &["padding"],
@@ -334,9 +342,12 @@ impl<'a> LayoutBox<'a> {
                 None => continue,
             };
             let slots: Vec<Option<f32>> = if matches!(family, Family::Border) {
-                vals.iter().filter_map(|t| px(t, font)).map(Some).collect()
+                vals.iter()
+                    .filter_map(|t| len_or(t, font, base))
+                    .map(Some)
+                    .collect()
             } else {
-                vals.iter().map(|t| px(t, font)).collect()
+                vals.iter().map(|t| len_or(t, font, base)).collect()
             };
             let v: [Option<f32>; 4] = match slots.len() {
                 1 => [slots[0], slots[0], slots[0], slots[0]],
@@ -350,24 +361,24 @@ impl<'a> LayoutBox<'a> {
         [None; 4]
     }
 
-    fn margin_sides(&self, font: f32) -> [Option<f32>; 4] {
+    fn margin_sides(&self, font: f32, base: f32) -> [Option<f32>; 4] {
         let el = match self.element() {
             Some(e) => e,
             None => return [Some(0.0); 4],
         };
-        let mut base = self.shorthand_base(Family::Margin, font);
+        let mut base4 = self.shorthand_base(Family::Margin, font, base);
         let sides = ["top", "right", "bottom", "left"];
         let mut any = el.computed.contains_key("margin");
         for (i, side) in sides.iter().enumerate() {
-            if let Some(v) = self.num(&format!("margin-{}", side), font) {
-                base[i] = Some(v);
+            if let Some(v) = self.num(&format!("margin-{}", side), font, base) {
+                base4[i] = Some(v);
                 any = true;
             }
         }
         if !any {
-            base = [Some(0.0); 4];
+            base4 = [Some(0.0); 4];
         }
-        base
+        base4
     }
 
     fn place(&mut self, flow: &Flow, parent_font: f32) {
@@ -379,18 +390,18 @@ impl<'a> LayoutBox<'a> {
 
     fn place_block(&mut self, flow: &Flow, parent_font: f32, root: bool) {
         let font = self.font(parent_font);
-        self.dims.margin = self.edges(Family::Margin, font);
-        self.dims.border = self.edges(Family::Border, font);
-        self.dims.padding = self.edges(Family::Padding, font);
+        self.dims.margin = self.edges(Family::Margin, font, flow.width);
+        self.dims.border = self.edges(Family::Border, font, flow.width);
+        self.dims.padding = self.edges(Family::Padding, font, flow.width);
         self.resolve_width(flow.width, font);
-        let explicit = self.num("height", font);
+        let explicit = self.num("height", font, flow.height);
         if let Some(h) = explicit {
             self.dims.content.height = h;
         }
         let can_top = !root && self.dims.border.top == 0.0 && self.dims.padding.top == 0.0;
         if can_top {
             if let Some(c) = self.children.first() {
-                let cmt = c.peek_margin_top(font);
+                let cmt = c.peek_margin_top(font, flow.width);
                 self.dims.margin.top = self.dims.margin.top.max(cmt);
             }
         }
@@ -414,7 +425,7 @@ impl<'a> LayoutBox<'a> {
         }
         let mut prev: Option<(f32, f32)> = None;
         for child in &mut self.children {
-            let cmt = child.peek_margin_top(font);
+            let cmt = child.peek_margin_top(font, self.dims.content.width);
             let (b, g) = match prev {
                 Some((bb, pmb)) => (bb, collapse(pmb, cmt)),
                 None => (
@@ -426,6 +437,7 @@ impl<'a> LayoutBox<'a> {
                 x: self.dims.content.x,
                 y: b + g - cmt,
                 width: self.dims.content.width,
+                height: self.dims.content.height,
             };
             child.place(&f, font);
             let bb = child.dims.border_box();
@@ -457,8 +469,8 @@ impl<'a> LayoutBox<'a> {
         let mut cy = top;
         let mut line = 0.0f32;
         for child in &mut self.children {
-            let mw = child.measure_w(font);
-            let mh = child.measure_h(font);
+            let mw = child.measure_w(font, self.dims.content.width);
+            let mh = child.measure_h(font, self.dims.content.width);
             if cx > left && cx + mw > limit {
                 cx = left;
                 cy += line;
@@ -468,6 +480,7 @@ impl<'a> LayoutBox<'a> {
                 x: cx,
                 y: cy,
                 width: limit - cx,
+                height: 0.0,
             };
             child.place(&f, font);
             cx += mw;
@@ -478,14 +491,14 @@ impl<'a> LayoutBox<'a> {
 
     fn place_inline(&mut self, flow: &Flow, parent_font: f32) {
         let font = self.font(parent_font);
-        self.dims.margin = self.edges(Family::Margin, font);
-        self.dims.border = self.edges(Family::Border, font);
-        self.dims.padding = self.edges(Family::Padding, font);
+        self.dims.margin = self.edges(Family::Margin, font, flow.width);
+        self.dims.border = self.edges(Family::Border, font, flow.width);
+        self.dims.padding = self.edges(Family::Padding, font, flow.width);
         self.dims.content.x =
             flow.x + self.dims.margin.left + self.dims.border.left + self.dims.padding.left;
         self.dims.content.y =
             flow.y + self.dims.margin.top + self.dims.border.top + self.dims.padding.top;
-        let w = self.num("width", font);
+        let w = self.num("width", font, flow.width);
         self.dims.content.width = w.unwrap_or(0.0);
         self.dims.content.height = self.line_height(font);
         let mut cx = self.dims.content.x;
@@ -493,8 +506,8 @@ impl<'a> LayoutBox<'a> {
         let mut line = 0.0f32;
         let limit = w.map(|v| self.dims.content.x + v);
         for child in &mut self.children {
-            let mw = child.measure_w(font);
-            let mh = child.measure_h(font);
+            let mw = child.measure_w(font, flow.width);
+            let mh = child.measure_h(font, flow.width);
             if let Some(lim) = limit {
                 if cx > self.dims.content.x && cx + mw > lim {
                     cx = self.dims.content.x;
@@ -506,6 +519,7 @@ impl<'a> LayoutBox<'a> {
                 x: cx,
                 y: cy,
                 width: mw,
+                height: 0.0,
             };
             child.place(&f, font);
             cx += mw;
@@ -533,13 +547,13 @@ impl<'a> LayoutBox<'a> {
             - self.dims.content.y;
     }
 
-    fn peek_margin_top(&self, parent_font: f32) -> f32 {
-        self.margin_sides(self.font(parent_font))[0].unwrap_or(0.0)
+    fn peek_margin_top(&self, parent_font: f32, base: f32) -> f32 {
+        self.margin_sides(self.font(parent_font), base)[0].unwrap_or(0.0)
     }
 
     fn resolve_width(&mut self, avail: f32, font: f32) {
-        let w = self.num("width", font);
-        let m = self.margin_sides(font);
+        let w = self.num("width", font, avail);
+        let m = self.margin_sides(font, avail);
         let fixed = self.dims.border.left
             + self.dims.border.right
             + self.dims.padding.left
@@ -563,22 +577,25 @@ impl<'a> LayoutBox<'a> {
         self.dims.content.width = width;
     }
 
-    fn measure_w(&self, parent_font: f32) -> f32 {
+    fn measure_w(&self, parent_font: f32, base: f32) -> f32 {
         let font = self.font(parent_font);
-        let m = self.edges(Family::Margin, font);
-        let b = self.edges(Family::Border, font);
-        let p = self.edges(Family::Padding, font);
-        let w = self
-            .num("width", font)
-            .unwrap_or_else(|| self.children.iter().map(|c| c.measure_w(font)).sum::<f32>());
+        let m = self.edges(Family::Margin, font, base);
+        let b = self.edges(Family::Border, font, base);
+        let p = self.edges(Family::Padding, font, base);
+        let w = self.num("width", font, base).unwrap_or_else(|| {
+            self.children
+                .iter()
+                .map(|c| c.measure_w(font, base))
+                .sum::<f32>()
+        });
         m.left + m.right + b.left + b.right + p.left + p.right + w
     }
 
-    fn measure_h(&self, parent_font: f32) -> f32 {
+    fn measure_h(&self, parent_font: f32, base: f32) -> f32 {
         let font = self.font(parent_font);
-        let m = self.edges(Family::Margin, font);
-        let b = self.edges(Family::Border, font);
-        let p = self.edges(Family::Padding, font);
+        let m = self.edges(Family::Margin, font, base);
+        let b = self.edges(Family::Border, font, base);
+        let p = self.edges(Family::Padding, font, base);
         m.top + m.bottom + b.top + b.bottom + p.top + p.bottom + self.line_height(font)
     }
 }
@@ -589,6 +606,20 @@ fn px(v: &Value, font: f32) -> Option<f32> {
         Value::Length(n, Unit::Em) => Some(n * font),
         _ => None,
     }
+}
+
+fn pct_val(v: &Value, base: f32) -> Option<f32> {
+    match v {
+        Value::Keyword(k) if k.ends_with('%') => k[..k.len() - 1]
+            .parse::<f32>()
+            .ok()
+            .map(|p| p * base / 100.0),
+        _ => None,
+    }
+}
+
+fn len_or(v: &Value, font: f32, base: f32) -> Option<f32> {
+    px(v, font).or_else(|| pct_val(v, base))
 }
 
 fn collapse(a: f32, b: f32) -> f32 {
@@ -749,6 +780,51 @@ mod tests {
         let root = layout(&styled, 100.0).unwrap();
         let div = find(&root, "div");
         assert!(eq(div.dims.content.height, 50.0));
+    }
+
+    #[test]
+    fn percent_width_padding() {
+        let dom = parse_html("<html><div></div></html>");
+        let sheet = parse_css("div { width: 50%; padding-left: 10% }");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let div = find(&root, "div");
+        assert!(eq(div.dims.content.width, 100.0));
+        assert!(eq(div.dims.padding.left, 20.0));
+        assert!(eq(div.dims.content.x, 20.0));
+    }
+
+    #[test]
+    fn percent_margins() {
+        let dom = parse_html("<html><div></div></html>");
+        let sheet = parse_css("div { width: 40px; margin-left: 25% }");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let div = find(&root, "div");
+        assert!(eq(div.dims.margin.left, 50.0));
+        assert!(eq(div.dims.content.x, 50.0));
+    }
+
+    #[test]
+    fn percent_font_size() {
+        let dom = parse_html("<html><div><span>hi</span></div></html>");
+        let sheet = parse_css("div { font-size: 200% }");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 100.0).unwrap();
+        let div = find(&root, "div");
+        let anon = &div.children[0];
+        assert!(eq(anon.dims.content.height, 38.4));
+    }
+
+    #[test]
+    fn percent_height_explicit_parent() {
+        let dom = parse_html("<html><div><p></p></div></html>");
+        let sheet = parse_css("div { height: 100px } p { height: 50% }");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 100.0).unwrap();
+        let div = find(&root, "div");
+        let p = find(div, "p");
+        assert!(eq(p.dims.content.height, 50.0));
     }
 
     #[test]

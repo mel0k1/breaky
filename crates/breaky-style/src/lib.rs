@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 
-use css::{Rule, Selector, SimpleSelector, Stylesheet, Value};
+use css::{Rule, Selector, SimpleSelector, Stylesheet, Unit, Value};
 use html::{Node, NodeKind};
+
+const BASE_FONT: f32 = 16.0;
 
 const INHERITED: [&str; 9] = [
     "color",
@@ -23,7 +25,7 @@ pub struct StyledNode<'a> {
 }
 
 pub fn build<'a>(node: &'a Node, sheet: &Stylesheet) -> StyledNode<'a> {
-    build_rec(node, sheet, &[], None)
+    build_rec(node, sheet, &[], None, BASE_FONT)
 }
 
 fn build_rec<'a>(
@@ -31,8 +33,10 @@ fn build_rec<'a>(
     sheet: &Stylesheet,
     ancestors: &[&'a Node],
     parent: Option<&HashMap<String, Vec<Value>>>,
+    parent_font: f32,
 ) -> StyledNode<'a> {
     let mut computed = HashMap::new();
+    let mut font = parent_font;
     match &node.kind {
         NodeKind::Element { .. } => {
             let mut matched: Vec<((usize, usize, usize), usize, &Rule)> = Vec::new();
@@ -60,6 +64,20 @@ fn build_rec<'a>(
                     }
                 }
             }
+            font = match computed.get("font-size").and_then(|v| v.first()) {
+                Some(Value::Length(n, Unit::Px)) => *n,
+                Some(Value::Length(n, Unit::Em)) => n * parent_font,
+                Some(Value::Keyword(k)) => k
+                    .trim_end_matches('%')
+                    .parse::<f32>()
+                    .map(|p| p * parent_font / 100.0)
+                    .unwrap_or(parent_font),
+                _ => parent_font,
+            };
+            computed.insert(
+                "font-size".to_string(),
+                vec![Value::Length(font, Unit::Px)],
+            );
         }
         NodeKind::Text(_) => {
             if let Some(m) = parent {
@@ -73,7 +91,7 @@ fn build_rec<'a>(
     let children = node
         .children
         .iter()
-        .map(|c| build_rec(c, sheet, &chain, Some(&computed)))
+        .map(|c| build_rec(c, sheet, &chain, Some(&computed), font))
         .collect();
     StyledNode {
         node,
@@ -225,6 +243,19 @@ mod tests {
         let p = el(el(&s, "div"), "p");
         assert_eq!(p.computed["color"], vec![rgb(0, 0, 255)]);
         assert_eq!(el(&s, "div").computed["color"], vec![rgb(255, 0, 0)]);
+    }
+
+    #[test]
+    fn font_size_resolved() {
+        let dom = parse_html("<div><p><b>t</b></p></div>");
+        let sheet = parse_css("div { font-size: 2em }");
+        let s = build(&dom, &sheet);
+        let div = el(&s, "div");
+        let p = el(div, "p");
+        assert_eq!(div.computed["font-size"], vec![px(32.0)]);
+        assert_eq!(p.computed["font-size"], vec![px(32.0)]);
+        let b = el(p, "b");
+        assert_eq!(b.computed["font-size"], vec![px(32.0)]);
     }
 
     #[test]
