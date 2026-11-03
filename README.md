@@ -12,14 +12,23 @@ A browser engine in Rust. Educational, experimental.
 cargo run -- page.html [style.css]
 ```
 
-Prints the DOM tree of the page and parsed CSS rules.
+Prints the DOM tree of the page and the styled tree with cascaded properties.
+
+## Architecture
+
+Workspace of small crates:
+
+- `breaky-html` — HTML tokenizer and DOM
+- `breaky-css` — CSS parser
+- `breaky-style` — selector matching and cascade
+- `breaky` — CLI
 
 ## Roadmap
 
 - [x] HTML tokenizer
 - [x] DOM builder
 - [x] CSS parser
-- [ ] Style engine
+- [x] Style engine
 - [ ] Layout
 - [ ] Rendering
 - [ ] Networking
