@@ -1037,6 +1037,49 @@ impl<'a> LayoutBox<'a> {
         self.dims.margin = self.edges(Family::Margin, font, flow.width);
         self.dims.border = self.edges(Family::Border, font, flow.width);
         self.dims.padding = self.edges(Family::Padding, font, flow.width);
+        let collapse = matches!(
+            self.style()
+                .and_then(|s| s.computed.get("border-collapse"))
+                .and_then(|v| v.first()),
+            Some(Value::Keyword(k)) if k == "collapse"
+        );
+        let t = self.dims.border;
+        let mut grids: Vec<Vec<Edges>> = Vec::new();
+        if collapse {
+            for row in &self.children {
+                if matches!(row.kind, BoxKind::TableRow(_) | BoxKind::Anonymous) {
+                    let mut g: Vec<Edges> = Vec::new();
+                    for cell in &row.children {
+                        g.push(cell.edges(Family::Border, cell.font(font), 0.0));
+                    }
+                    grids.push(g);
+                }
+            }
+            let mut tb = Edges::default();
+            for (k, g) in grids.iter().enumerate() {
+                if g.is_empty() {
+                    continue;
+                }
+                if k == 0 {
+                    for e in g {
+                        tb.top = tb.top.max(e.top);
+                    }
+                }
+                if k + 1 == grids.len() {
+                    for e in g {
+                        tb.bottom = tb.bottom.max(e.bottom);
+                    }
+                }
+                tb.left = tb.left.max(g[0].left);
+                tb.right = tb.right.max(g[g.len() - 1].right);
+            }
+            self.dims.border = Edges {
+                top: tb.top.max(t.top) / 2.0,
+                right: tb.right.max(t.right) / 2.0,
+                bottom: tb.bottom.max(t.bottom) / 2.0,
+                left: tb.left.max(t.left) / 2.0,
+            };
+        }
         let ms = self.margin_sides(font, flow.width);
         let ml = ms[3].unwrap_or(0.0);
         let mr = ms[1].unwrap_or(0.0);
@@ -1092,6 +1135,7 @@ impl<'a> LayoutBox<'a> {
             self.dims.content.height = h;
         }
         let mut y = self.dims.content.y;
+        let mut k = 0usize;
         for row in &mut self.children {
             if matches!(row.kind, BoxKind::TableRow(_) | BoxKind::Anonymous) {
                 row.dims.content.x = self.dims.content.x;
@@ -1104,6 +1148,40 @@ impl<'a> LayoutBox<'a> {
                     let cfont = cell.font(font);
                     cell.dims.margin = cell.edges(Family::Margin, cfont, avail);
                     cell.dims.border = cell.edges(Family::Border, cfont, avail);
+                    if collapse {
+                        let g = &grids[k];
+                        let cur = g[i];
+                        let prev = if i > 0 { g[i - 1].right } else { t.left };
+                        let next = if i + 1 < g.len() { g[i + 1].left } else { t.right };
+                        let above = if k > 0 {
+                            grids[k - 1].get(i).map(|e| e.bottom).unwrap_or(0.0)
+                        } else {
+                            t.top
+                        };
+                        let below = if k + 1 < grids.len() {
+                            grids[k + 1].get(i).map(|e| e.top).unwrap_or(0.0)
+                        } else {
+                            t.bottom
+                        };
+                        let top = if k == 0 { cur.top.max(t.top) } else { cur.top.max(above) };
+                        let bot = if k + 1 == grids.len() {
+                            cur.bottom.max(t.bottom)
+                        } else {
+                            cur.bottom.max(below)
+                        };
+                        let left = if i == 0 { cur.left.max(t.left) } else { cur.left.max(prev) };
+                        let right = if i + 1 == g.len() {
+                            cur.right.max(t.right)
+                        } else {
+                            cur.right.max(next)
+                        };
+                        cell.dims.border = Edges {
+                            top: top / 2.0,
+                            right: right / 2.0,
+                            bottom: bot / 2.0,
+                            left: left / 2.0,
+                        };
+                    }
                     cell.dims.padding = cell.edges(Family::Padding, cfont, avail);
                     let fixed = cell.dims.border.left
                         + cell.dims.border.right
@@ -1130,6 +1208,7 @@ impl<'a> LayoutBox<'a> {
                     x += cw;
                 }
                 row.dims.content.height = row_h;
+                k += 1;
             } else {
                 let f = Flow {
                     x: self.dims.content.x,
@@ -1138,6 +1217,7 @@ impl<'a> LayoutBox<'a> {
                     height: 0.0,
                 };
                 row.place(&f, floats, font);
+                row.apply_relative(font, width);
             }
             let rb = row.dims.margin_box();
             y = rb.y + rb.height;
@@ -2796,6 +2876,82 @@ mod tests {
         let row = &div.children[1];
         assert!(matches!(row.kind, BoxKind::TableRow(_)));
         assert!(eq(row.dims.content.y, 19.2));
+    }
+
+    #[test]
+    fn table_collapse_shares_adjacent_border() {
+        let dom = parse_html(
+            "<html><table style=\"border-collapse: collapse\"><tr><td>a</td><td>b</td></tr></table></html>",
+        );
+        let sheet = parse_css("td { border: 2px solid #000000 }");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let table = find(&root, "table");
+        let w = font::width("a", 16.0);
+        let row = &table.children[0];
+        let c1 = &row.children[0];
+        let c2 = &row.children[1];
+        assert!(eq(c1.dims.border.left, 1.0));
+        assert!(eq(c1.dims.border.right, 1.0));
+        assert!(eq(c1.dims.content.x, 2.0));
+        assert!(eq(c2.dims.content.x, w + 6.0));
+        assert!(eq(table.dims.border.left, 1.0));
+        assert!(eq(table.dims.content.width, 2.0 * w + 8.0));
+        assert!(eq(table.dims.content.height, 21.2));
+    }
+
+    #[test]
+    fn table_collapse_takes_max_border() {
+        let dom = parse_html(
+            "<html><table style=\"border-collapse: collapse\"><tr><td class=\"w\">a</td><td>b</td></tr></table></html>",
+        );
+        let sheet = parse_css("td { border: 2px solid #000000 } .w { border: 4px solid #000000 }");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let table = find(&root, "table");
+        let w = font::width("a", 16.0);
+        let row = &table.children[0];
+        let c1 = &row.children[0];
+        let c2 = &row.children[1];
+        assert!(eq(c1.dims.border.left, 2.0));
+        assert!(eq(c1.dims.border.right, 2.0));
+        assert!(eq(c2.dims.border.left, 2.0));
+        assert!(eq(c2.dims.border.right, 1.0));
+        assert!(eq(c2.dims.content.x, w + 12.0));
+    }
+
+    #[test]
+    fn table_collapse_outer_edge() {
+        let dom = parse_html(
+            "<html><table style=\"border: 6px solid #000000; border-collapse: collapse\"><tr><td>a</td></tr></table></html>",
+        );
+        let sheet = parse_css("td { border: 2px solid #000000 }");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let table = find(&root, "table");
+        let c1 = &table.children[0].children[0];
+        assert!(eq(table.dims.border.left, 3.0));
+        assert!(eq(table.dims.content.x, 3.0));
+        assert!(eq(c1.dims.border.left, 3.0));
+        assert!(eq(c1.dims.border.right, 3.0));
+        assert!(eq(c1.dims.content.x, 6.0));
+    }
+
+    #[test]
+    fn table_collapse_vertical_borders() {
+        let dom = parse_html(
+            "<html><table style=\"border-collapse: collapse\"><tr><td>a</td></tr><tr><td>b</td></tr></table></html>",
+        );
+        let sheet = parse_css("td { border: 2px solid #000000 }");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let table = find(&root, "table");
+        let c1 = &table.children[0].children[0];
+        let c2 = &table.children[1].children[0];
+        assert!(eq(c1.dims.border.bottom, 1.0));
+        assert!(eq(c2.dims.border.top, 1.0));
+        assert!(eq(c2.dims.content.y, 23.2));
+        assert!(eq(table.dims.content.height, 42.4));
     }
 
     #[test]

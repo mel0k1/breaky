@@ -552,6 +552,22 @@ mod tests {
         assert_eq!(canvas.pixel(20, 5), [255, 255, 255]);
     }
 
+    #[test]
+    fn table_collapse_paints_single_border() {
+        let dom = parse_html(
+            "<html><table style=\"border-collapse: collapse\"><tr><td>a</td><td>b</td></tr></table></html>",
+        );
+        let sheet = parse_css("td { border: 2px solid #000000 }");
+        let styled = style_build(&dom, &sheet);
+        let tree = layout(&styled, 200.0).unwrap();
+        let canvas = paint(&tree, 200.0);
+        let x = font::width("a", 16.0) as u32 + 5;
+        assert_eq!(canvas.pixel(x - 1, 2), [0, 0, 0]);
+        assert_eq!(canvas.pixel(x, 2), [0, 0, 0]);
+        assert_eq!(canvas.pixel(x - 2, 2), [255, 255, 255]);
+        assert_eq!(canvas.pixel(x + 1, 2), [255, 255, 255]);
+    }
+
     fn parse_png(png: &[u8]) -> (u32, u32, Vec<u8>) {
         let mut i = 8;
         let mut wh = (0u32, 0u32);
