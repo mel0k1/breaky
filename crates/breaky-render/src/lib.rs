@@ -1,4 +1,4 @@
-use css::{Color, Value};
+use css::{Color, Unit, Value};
 use layout::{BoxKind, LayoutBox, Rect};
 
 pub struct Canvas {
@@ -39,6 +39,31 @@ impl Canvas {
             for x in x0..x1 {
                 self.blend(x, y, c);
             }
+        }
+    }
+
+    pub fn text(&mut self, x: f32, y: f32, s: &str, c: Color, size: f32) {
+        let sc = font::scale(size);
+        let top = y - font::ASCENT * sc;
+        let mut pen = x;
+        for ch in s.chars() {
+            let g = font::glyph(ch);
+            for (r, row) in g.rows.iter().enumerate() {
+                for col in 0..g.width {
+                    if (row >> col) & 1 == 1 {
+                        self.fill(
+                            Rect {
+                                x: pen + col as f32 * sc,
+                                y: top + r as f32 * sc,
+                                width: sc,
+                                height: sc,
+                            },
+                            c,
+                        );
+                    }
+                }
+            }
+            pen += (g.width as f32 + 1.0) * sc;
         }
     }
 
@@ -103,6 +128,7 @@ fn max_bottom(b: &LayoutBox) -> f32 {
 
 fn paint_box(canvas: &mut Canvas, b: &LayoutBox) {
     paint_bg(canvas, b);
+    paint_text(canvas, b);
     for child in &b.children {
         if !is_float(child) {
             paint_box(canvas, child);
@@ -113,6 +139,54 @@ fn paint_box(canvas: &mut Canvas, b: &LayoutBox) {
             paint_box(canvas, child);
         }
     }
+}
+
+fn paint_text(canvas: &mut Canvas, b: &LayoutBox) {
+    let t = match b.text {
+        Some(t) => t,
+        None => return,
+    };
+    let map = computed(b);
+    let color = map
+        .and_then(|m| token_color(m, "color"))
+        .unwrap_or(Color {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 255,
+        });
+    let (size, lh) = text_metrics(map);
+    let sc = font::scale(size);
+    let baseline =
+        b.dims.content.y + (lh - (font::ASCENT + font::DESCENT) * sc) / 2.0 + font::ASCENT * sc;
+    canvas.text(b.dims.content.x, baseline, t, color, size);
+}
+
+fn text_metrics(map: Option<&std::collections::HashMap<String, Vec<Value>>>) -> (f32, f32) {
+    const BASE_FONT: f32 = 16.0;
+    let size = map
+        .and_then(|m| m.get("font-size"))
+        .and_then(|v| v.first())
+        .and_then(|v| match v {
+            Value::Length(n, _) => Some(*n),
+            _ => None,
+        })
+        .unwrap_or(BASE_FONT);
+    let lh = map
+        .and_then(|m| m.get("line-height"))
+        .and_then(|v| v.first())
+        .and_then(|v| match v {
+            Value::Length(n, Unit::Px) => Some(*n),
+            Value::Length(n, Unit::Em) => Some(n * size),
+            Value::Keyword(k) => k
+                .trim_end_matches('%')
+                .parse::<f32>()
+                .ok()
+                .map(|m| m * size),
+            _ => None,
+        })
+        .unwrap_or(size * 1.2);
+    (size, lh)
 }
 
 fn paint_bg(canvas: &mut Canvas, b: &LayoutBox) {
@@ -388,6 +462,50 @@ mod tests {
         assert_eq!(&raw[1..10], &canvas.pixels[0..9]);
         assert_eq!(raw[10], 0);
         assert_eq!(&raw[11..20], &canvas.pixels[9..18]);
+    }
+
+    #[test]
+    fn text_draws_glyphs() {
+        let dom = parse_html("<html><p>l</p></html>");
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let tree = layout(&styled, 100.0).unwrap();
+        let canvas = paint(&tree, 100.0);
+        assert_eq!(canvas.pixel(0, 11), [0, 0, 0]);
+        assert_eq!(canvas.pixel(1, 5), [0, 0, 0]);
+        assert_eq!(canvas.pixel(4, 11), [255, 255, 255]);
+        assert_eq!(canvas.pixel(0, 15), [255, 255, 255]);
+    }
+
+    #[test]
+    fn text_color() {
+        let dom = parse_html("<html><p>l</p></html>");
+        let sheet = parse_css("p { color: #ff0000 }");
+        let styled = style_build(&dom, &sheet);
+        let tree = layout(&styled, 100.0).unwrap();
+        let canvas = paint(&tree, 100.0);
+        assert_eq!(canvas.pixel(0, 11), [255, 0, 0]);
+    }
+
+    #[test]
+    fn text_inherited_color() {
+        let dom = parse_html("<html><div><p>l</p></div></html>");
+        let sheet = parse_css("div { color: #0000ff }");
+        let styled = style_build(&dom, &sheet);
+        let tree = layout(&styled, 100.0).unwrap();
+        let canvas = paint(&tree, 100.0);
+        assert_eq!(canvas.pixel(0, 11), [0, 0, 255]);
+    }
+
+    #[test]
+    fn text_font_size_scales() {
+        let dom = parse_html("<html><p>l</p></html>");
+        let sheet = parse_css("p { font-size: 32px }");
+        let styled = style_build(&dom, &sheet);
+        let tree = layout(&styled, 100.0).unwrap();
+        let canvas = paint(&tree, 100.0);
+        assert_eq!(canvas.pixel(0, 25), [0, 0, 0]);
+        assert_eq!(canvas.pixel(5, 25), [255, 255, 255]);
     }
 
     fn parse_png(png: &[u8]) -> (u32, u32, Vec<u8>) {
