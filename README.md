@@ -26,7 +26,7 @@ Workspace of small crates:
 - `breaky-layout` — box tree and block/inline layout
 - `breaky-render` — PNG painter (hand-written encoder, zero deps)
 - `breaky-font` — embedded bitmap font and glyph metrics
-- `breaky-img` — PNG and JPEG decoders (hand-written inflate, IDCT, zero deps)
+- `breaky-img` — PNG, JPEG and GIF decoders (hand-written inflate, IDCT, LZW, zero deps)
 - `breaky-net` — HTTP client and URL resolution
 - `breaky` — CLI
 
@@ -65,6 +65,9 @@ Workspace of small crates:
 - [x] Background position
 - [x] Images (img element)
 - [x] Image smoothing
+- [x] Background size
+- [x] GIF decoder
+- [x] Object fit
 
 ## License
 
