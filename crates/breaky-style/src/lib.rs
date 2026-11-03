@@ -57,6 +57,11 @@ fn build_rec<'a>(
                     computed.insert(d.name.clone(), d.value.clone());
                 }
             }
+            if let Some(s) = attr(node, "style") {
+                for d in css::declarations(s) {
+                    computed.insert(d.name, d.value);
+                }
+            }
             for key in INHERITED {
                 if !computed.contains_key(key) {
                     if let Some(v) = parent.and_then(|m| m.get(key)) {
@@ -186,6 +191,14 @@ mod tests {
         let sheet = parse_css("p { color: red } p { color: blue }");
         let s = build(&dom, &sheet);
         assert_eq!(el(&s, "p").computed["color"], vec![rgb(0, 0, 255)]);
+    }
+
+    #[test]
+    fn inline_style_wins() {
+        let dom = parse_html("<p style=\"color: green\">t</p>");
+        let sheet = parse_css("p { color: red }");
+        let s = build(&dom, &sheet);
+        assert_eq!(el(&s, "p").computed["color"], vec![rgb(0, 128, 0)]);
     }
 
     #[test]

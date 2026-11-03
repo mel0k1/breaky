@@ -119,6 +119,20 @@ pub fn parse(src: &str) -> Stylesheet {
     Stylesheet { rules }
 }
 
+pub fn declarations(src: &str) -> Vec<Declaration> {
+    let chars: Vec<char> = src.chars().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let (d, next) = declaration(&chars, i);
+        if let Some(d) = d {
+            out.push(d);
+        }
+        i = next + 1;
+    }
+    out
+}
+
 fn rule(chars: &[char], start: usize) -> (Option<Rule>, usize) {
     let mut i = start;
     let mut selectors = Vec::new();
@@ -523,6 +537,19 @@ fn find_seq(chars: &[char], from: usize, pat: &[char]) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inline_declarations() {
+        let d = declarations("font-size: 24px; color:#f00; margin : 0 auto");
+        assert_eq!(d.len(), 3);
+        assert_eq!(d[0].name, "font-size");
+        assert_eq!(d[0].value, vec![Value::Length(24.0, Unit::Px)]);
+        assert_eq!(d[1].value, vec![Value::Color(Color { r: 255, g: 0, b: 0, a: 255 })]);
+        assert_eq!(
+            d[2].value,
+            vec![Value::Length(0.0, Unit::Px), Value::Keyword("auto".into())]
+        );
+    }
 
     #[test]
     fn basic_rule() {
