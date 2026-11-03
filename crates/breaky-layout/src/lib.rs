@@ -70,6 +70,7 @@ pub enum BoxKind<'a> {
 pub struct LayoutBox<'a> {
     pub dims: Dimensions,
     pub kind: BoxKind<'a>,
+    pub text: Option<&'a str>,
     pub children: Vec<LayoutBox<'a>>,
 }
 
@@ -146,67 +147,103 @@ fn num(x: f32) -> String {
 }
 
 fn build_root<'a>(styled: &'a StyledNode<'a>) -> Option<LayoutBox<'a>> {
-    if matches!(styled.node.kind, NodeKind::Element { .. }) {
-        return build_box(styled);
-    }
-    let mut kids = block_children(styled);
+    let mut kids = if matches!(styled.node.kind, NodeKind::Element { .. }) {
+        boxes_for(styled)
+    } else {
+        block_children(styled)
+    };
     match kids.len() {
         0 => None,
         1 => kids.pop(),
         _ => Some(LayoutBox {
             dims: Dimensions::default(),
             kind: BoxKind::Anonymous,
+            text: None,
             children: kids,
         }),
     }
 }
 
-fn build_box<'a>(styled: &'a StyledNode<'a>) -> Option<LayoutBox<'a>> {
+fn boxes_for<'a>(styled: &'a StyledNode<'a>) -> Vec<LayoutBox<'a>> {
     match &styled.node.kind {
         NodeKind::Element { .. } => {
             if float_side(styled).is_some() {
-                return Some(LayoutBox {
+                return vec![LayoutBox {
                     dims: Dimensions::default(),
                     kind: BoxKind::Block(styled),
+                    text: None,
                     children: block_children(styled),
-                });
+                }];
             }
             match display(styled) {
-                Display::None => None,
-                Display::Inline => Some(LayoutBox {
+                Display::None => Vec::new(),
+                Display::Inline => vec![LayoutBox {
                     dims: Dimensions::default(),
                     kind: BoxKind::Inline(styled),
-                    children: styled.children.iter().filter_map(build_inline).collect(),
-                }),
-                Display::Block => Some(LayoutBox {
+                    text: None,
+                    children: inline_children(styled),
+                }],
+                Display::Block => vec![LayoutBox {
                     dims: Dimensions::default(),
                     kind: BoxKind::Block(styled),
+                    text: None,
                     children: block_children(styled),
-                }),
+                }],
             }
         }
-        NodeKind::Text(_) => Some(LayoutBox {
-            dims: Dimensions::default(),
-            kind: BoxKind::Inline(styled),
-            children: Vec::new(),
-        }),
-        _ => None,
+        NodeKind::Text(src) => text_boxes(styled, src),
+        _ => Vec::new(),
     }
 }
 
-fn build_inline<'a>(styled: &'a StyledNode<'a>) -> Option<LayoutBox<'a>> {
+fn inline_children<'a>(styled: &'a StyledNode<'a>) -> Vec<LayoutBox<'a>> {
+    styled.children.iter().flat_map(inline_boxes).collect()
+}
+
+fn inline_boxes<'a>(styled: &'a StyledNode<'a>) -> Vec<LayoutBox<'a>> {
     match &styled.node.kind {
-        NodeKind::Element { .. } if display(styled) != Display::None => Some(LayoutBox {
+        NodeKind::Element { .. } if display(styled) != Display::None => vec![LayoutBox {
             dims: Dimensions::default(),
             kind: BoxKind::Inline(styled),
-            children: styled.children.iter().filter_map(build_inline).collect(),
-        }),
-        NodeKind::Text(_) => Some(LayoutBox {
-            dims: Dimensions::default(),
-            kind: BoxKind::Inline(styled),
-            children: Vec::new(),
-        }),
-        _ => None,
+            text: None,
+            children: inline_children(styled),
+        }],
+        NodeKind::Text(src) => text_boxes(styled, src),
+        _ => Vec::new(),
+    }
+}
+
+fn text_boxes<'a>(styled: &'a StyledNode<'a>, src: &'a str) -> Vec<LayoutBox<'a>> {
+    let mut out: Vec<LayoutBox<'a>> = Vec::new();
+    let words: Vec<&str> = src.split_whitespace().collect();
+    if words.is_empty() {
+        if !src.is_empty() {
+            out.push(word_box(styled, " "));
+        }
+        return out;
+    }
+    if src.trim_start().len() < src.len() {
+        out.push(word_box(styled, " "));
+    }
+    let mut it = words.iter().peekable();
+    while let Some(w) = it.next() {
+        out.push(word_box(styled, w));
+        if it.peek().is_some() {
+            out.push(word_box(styled, " "));
+        }
+    }
+    if src.trim_end().len() < src.len() {
+        out.push(word_box(styled, " "));
+    }
+    out
+}
+
+fn word_box<'a>(styled: &'a StyledNode<'a>, text: &'a str) -> LayoutBox<'a> {
+    LayoutBox {
+        dims: Dimensions::default(),
+        kind: BoxKind::Inline(styled),
+        text: Some(text),
+        children: Vec::new(),
     }
 }
 
@@ -224,21 +261,20 @@ fn float_side(styled: &StyledNode) -> Option<Side> {
 fn block_children<'a>(styled: &'a StyledNode<'a>) -> Vec<LayoutBox<'a>> {
     let mut out: Vec<LayoutBox<'a>> = Vec::new();
     for c in &styled.children {
-        let b = match build_box(c) {
-            Some(b) => b,
-            None => continue,
-        };
-        if matches!(b.kind, BoxKind::Inline(_)) {
-            match out.last_mut() {
-                Some(last) if matches!(last.kind, BoxKind::Anonymous) => last.children.push(b),
-                _ => out.push(LayoutBox {
-                    dims: Dimensions::default(),
-                    kind: BoxKind::Anonymous,
-                    children: vec![b],
-                }),
+        for b in boxes_for(c) {
+            if matches!(b.kind, BoxKind::Inline(_)) {
+                match out.last_mut() {
+                    Some(last) if matches!(last.kind, BoxKind::Anonymous) => last.children.push(b),
+                    _ => out.push(LayoutBox {
+                        dims: Dimensions::default(),
+                        kind: BoxKind::Anonymous,
+                        text: None,
+                        children: vec![b],
+                    }),
+                }
+            } else {
+                out.push(b);
             }
-        } else {
-            out.push(b);
         }
     }
     out
@@ -261,6 +297,9 @@ fn display(styled: &StyledNode) -> Display {
 
 fn default_display(name: &str) -> Display {
     match name {
+        "head" | "title" | "meta" | "link" | "style" | "script" | "noscript" | "template" => {
+            Display::None
+        }
         "a" | "b" | "i" | "s" | "u" | "em" | "strong" | "span" | "code" | "small" | "sub"
         | "sup" | "label" => Display::Inline,
         _ => Display::Block,
@@ -523,12 +562,17 @@ impl<'a> LayoutBox<'a> {
         let mut cx = full_l;
         let mut cy = top;
         let mut line = 0.0f32;
-        let mut empty = true;
+        let mut line_start = true;
+        let mut prev_space = false;
         for child in &mut self.children {
+            let space = child.text == Some(" ");
+            if space && (line_start || prev_space) {
+                continue;
+            }
             let mw = child.measure_w(font, full_r - full_l);
             let mh = child.measure_h(font, full_r - full_l);
             let (l, r) = band(floats, cy, mh.max(line), full_l, full_r);
-            if empty {
+            if line_start {
                 cx = l;
                 if mw > r - l {
                     cy = floats
@@ -549,17 +593,22 @@ impl<'a> LayoutBox<'a> {
                         .fold(cy, f32::max);
                     cx = band(floats, cy, mh, full_l, full_r).0;
                 }
+                line_start = true;
+                if space {
+                    continue;
+                }
             }
             let f = Flow {
                 x: cx,
                 y: cy,
-                width: 0.0,
+                width: r - cx,
                 height: 0.0,
             };
             child.place(&f, floats, font);
             cx += mw;
             line = line.max(mh);
-            empty = false;
+            line_start = false;
+            prev_space = space;
         }
         self.dims.content.height = cy + line - top;
     }
@@ -578,21 +627,33 @@ impl<'a> LayoutBox<'a> {
             flow.x + self.dims.margin.left + self.dims.border.left + self.dims.padding.left;
         self.dims.content.y =
             flow.y + self.dims.margin.top + self.dims.border.top + self.dims.padding.top;
-        let w = self.num("width", font, flow.width);
+        let w = self
+            .num("width", font, flow.width)
+            .or_else(|| self.text.map(|t| font::width(t, font)));
         self.dims.content.width = w.unwrap_or(0.0);
         self.dims.content.height = self.line_height(font);
         let mut cx = self.dims.content.x;
         let mut cy = self.dims.content.y;
         let mut line = 0.0f32;
+        let mut line_start = true;
+        let mut prev_space = false;
         let limit = w.map(|v| self.dims.content.x + v);
         for child in &mut self.children {
+            let space = child.text == Some(" ");
+            if space && (line_start || prev_space) {
+                continue;
+            }
             let mw = child.measure_w(font, flow.width);
             let mh = child.measure_h(font, flow.width);
             if let Some(lim) = limit {
-                if cx > self.dims.content.x && cx + mw > lim {
+                if !line_start && cx + mw > lim {
                     cx = self.dims.content.x;
                     cy += line;
                     line = 0.0;
+                    line_start = true;
+                    if space {
+                        continue;
+                    }
                 }
             }
             let f = Flow {
@@ -604,6 +665,8 @@ impl<'a> LayoutBox<'a> {
             child.place(&f, floats, font);
             cx += mw;
             line = line.max(mh);
+            line_start = false;
+            prev_space = space;
         }
         if w.is_none() && !self.children.is_empty() {
             self.dims.content.width = self
@@ -723,6 +786,9 @@ impl<'a> LayoutBox<'a> {
 
     fn measure_w(&self, parent_font: f32, base: f32) -> f32 {
         let font = self.font(parent_font);
+        if let Some(t) = self.text {
+            return font::width(t, font);
+        }
         let m = self.edges(Family::Margin, font, base);
         let b = self.edges(Family::Border, font, base);
         let p = self.edges(Family::Padding, font, base);
@@ -1156,7 +1222,77 @@ mod tests {
         let anon = &p.children[0];
         let b = find(anon, "b");
         assert!(eq(b.dims.content.x, 2.0));
-        assert!(eq(b.dims.border_box().width, 4.0));
+        assert!(eq(
+            b.dims.border_box().width,
+            4.0 + font::width("x", 16.0)
+        ));
+    }
+
+    #[test]
+    fn text_measured() {
+        let dom = parse_html("<html><p>hi</p></html>");
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 100.0).unwrap();
+        let p = find(&root, "p");
+        let anon = &p.children[0];
+        let text = &anon.children[0];
+        assert!(eq(text.dims.content.width, font::width("hi", 16.0)));
+        assert!(eq(p.dims.content.height, 19.2));
+    }
+
+    #[test]
+    fn text_scales_with_font() {
+        let dom = parse_html("<html><p>hi</p></html>");
+        let sheet = parse_css("p { font-size: 32px }");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 100.0).unwrap();
+        let p = find(&root, "p");
+        let text = &p.children[0].children[0];
+        assert!(eq(text.dims.content.width, font::width("hi", 32.0)));
+    }
+
+    #[test]
+    fn whitespace_collapses() {
+        let dom = parse_html("<html><p>a  b</p></html>");
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 100.0).unwrap();
+        let p = find(&root, "p");
+        let anon = &p.children[0];
+        assert_eq!(anon.children.len(), 3);
+        assert_eq!(anon.children[0].text, Some("a"));
+        assert_eq!(anon.children[1].text, Some(" "));
+        assert_eq!(anon.children[2].text, Some("b"));
+    }
+
+    #[test]
+    fn word_wrap() {
+        let dom = parse_html("<html><p>Hello world</p></html>");
+        let sheet = parse_css("p { width: 60px }");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let p = find(&root, "p");
+        let anon = &p.children[0];
+        assert_eq!(anon.children.len(), 3);
+        let world = &anon.children[2];
+        assert!(eq(world.dims.content.x, 0.0));
+        assert!(eq(world.dims.content.y, 19.2));
+        assert!(eq(anon.dims.content.height, 38.4));
+    }
+
+    #[test]
+    fn wrap_skips_leading_space() {
+        let dom = parse_html("<html><p>aa bb cc</p></html>");
+        let sheet = parse_css("p { width: 50px }");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let p = find(&root, "p");
+        let anon = &p.children[0];
+        let cc = &anon.children[4];
+        assert_eq!(cc.text, Some("cc"));
+        assert!(eq(cc.dims.content.x, 0.0));
+        assert!(eq(cc.dims.content.y, 19.2));
     }
 
     #[test]
