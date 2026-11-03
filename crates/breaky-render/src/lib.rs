@@ -258,12 +258,7 @@ fn paint_img(canvas: &mut Canvas, b: &LayoutBox, imgs: &img::Store) {
     if c.width <= 0.0 || c.height <= 0.0 {
         return;
     }
-    let nearest = matches!(
-        computed(b)
-            .and_then(|m| m.get("image-rendering"))
-            .and_then(|v| v.first()),
-        Some(Value::Keyword(k)) if k == "pixelated"
-    );
+    let nearest = computed(b).map(pixelated).unwrap_or(false);
     canvas.image_scaled(
         c.x,
         c.y,
@@ -406,7 +401,15 @@ fn paint_bg(canvas: &mut Canvas, b: &LayoutBox, imgs: &img::Store) {
         if let Some(u) = bg_url(m) {
             if let Some(im) = imgs.get(&u) {
                 let pb = d.padding_box();
-                let (rw, rh) = (im.width as f32, im.height as f32);
+                let font = text_metrics(Some(m)).0;
+                let (rw, rh) = bg_size(
+                    m,
+                    pb.width,
+                    pb.height,
+                    im.width as f32,
+                    im.height as f32,
+                    font,
+                );
                 let (ox, oy) = bg_offset(m, pb.width, pb.height, rw, rh);
                 let xs = match bg_repeat(m) {
                     Repeat::Y | Repeat::None => vec![ox],
@@ -418,7 +421,7 @@ fn paint_bg(canvas: &mut Canvas, b: &LayoutBox, imgs: &img::Store) {
                 };
                 for y in ys {
                     for x in &xs {
-                        canvas.image(pb.x + x, pb.y + y, im, pb);
+                        canvas.image_scaled(pb.x + x, pb.y + y, rw, rh, im, pb, !pixelated(m));
                     }
                 }
             }
@@ -481,6 +484,14 @@ enum Repeat {
     None,
 }
 
+enum Sz {
+    Len(f32),
+    Pct(f32),
+    Auto,
+    Cover,
+    Contain,
+}
+
 fn span(start: f32, total: f32, tile: f32) -> Vec<f32> {
     if tile <= 0.0 || total <= 0.0 {
         return vec![start];
@@ -536,6 +547,13 @@ fn bg_axis(p: Pos, extent: f32, tile: f32) -> f32 {
     }
 }
 
+fn split_slash(vals: &[Value]) -> (&[Value], &[Value]) {
+    match vals.iter().position(|v| matches!(v, Value::Keyword(k) if k == "/")) {
+        Some(i) => (&vals[..i], &vals[i + 1..]),
+        None => (vals, &[]),
+    }
+}
+
 fn bg_offset(
     m: &std::collections::HashMap<String, Vec<Value>>,
     cw: f32,
@@ -544,19 +562,21 @@ fn bg_offset(
     rh: f32,
 ) -> (f32, f32) {
     let font = text_metrics(Some(m)).0;
-    let vals = m
-        .get("background-position")
-        .or_else(|| m.get("background"));
+    let vals: &[Value] = if let Some(v) = m.get("background-position") {
+        v
+    } else if let Some(all) = m.get("background") {
+        split_slash(all).0
+    } else {
+        &[]
+    };
     let mut x: Option<Pos> = None;
     let mut y: Option<Pos> = None;
-    if let Some(vs) = vals {
-        for v in vs {
-            if let Some(p) = pos_of(v, font) {
-                if x.is_none() && !matches!(p, Pos::Top | Pos::Bottom) {
-                    x = Some(p);
-                } else if y.is_none() {
-                    y = Some(p);
-                }
+    for v in vals {
+        if let Some(p) = pos_of(v, font) {
+            if x.is_none() && !matches!(p, Pos::Top | Pos::Bottom) {
+                x = Some(p);
+            } else if y.is_none() {
+                y = Some(p);
             }
         }
     }
@@ -601,6 +621,77 @@ fn bg_repeat(m: &std::collections::HashMap<String, Vec<Value>>) -> Repeat {
     m.get("background")
         .and_then(|v| of(v))
         .unwrap_or(Repeat::Both)
+}
+
+fn size_of(v: &Value, font: f32) -> Option<Sz> {
+    match v {
+        Value::Length(n, Unit::Px) => Some(Sz::Len(*n)),
+        Value::Length(n, Unit::Em) => Some(Sz::Len(n * font)),
+        Value::Keyword(k) => {
+            if let Some(p) = k.strip_suffix('%') {
+                return p.parse::<f32>().ok().map(Sz::Pct);
+            }
+            match k.as_str() {
+                "cover" => Some(Sz::Cover),
+                "contain" => Some(Sz::Contain),
+                "auto" => Some(Sz::Auto),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn bg_size(
+    m: &std::collections::HashMap<String, Vec<Value>>,
+    pw: f32,
+    ph: f32,
+    iw: f32,
+    ih: f32,
+    font: f32,
+) -> (f32, f32) {
+    let vals: Vec<Value> = match m.get("background-size") {
+        Some(v) => v.clone(),
+        None => match m.get("background") {
+            Some(all) => split_slash(all).1.to_vec(),
+            None => Vec::new(),
+        },
+    };
+    let n: Vec<Sz> = vals.iter().filter_map(|v| size_of(v, font)).collect();
+    if n.iter().any(|s| matches!(s, Sz::Cover)) {
+        let s = (pw / iw).max(ph / ih);
+        return (iw * s, ih * s);
+    }
+    if n.iter().any(|s| matches!(s, Sz::Contain)) {
+        let s = (pw / iw).min(ph / ih);
+        return (iw * s, ih * s);
+    }
+    let ratio = if ih > 0.0 { iw / ih } else { 1.0 };
+    let axis = |s: Option<&Sz>, base: f32| match s {
+        Some(Sz::Len(v)) => Some(*v),
+        Some(Sz::Pct(k)) => Some(base * k / 100.0),
+        _ => None,
+    };
+    let w = axis(n.first(), pw);
+    let h = axis(n.get(1), ph);
+    let (w, h) = match (w, h) {
+        (Some(w), Some(h)) => (w, h),
+        (Some(w), None) => (w, w / ratio),
+        (None, Some(h)) => (h * ratio, h),
+        (None, None) => (iw, ih),
+    };
+    if w > 0.0 && h > 0.0 {
+        (w, h)
+    } else {
+        (iw, ih)
+    }
+}
+
+fn pixelated(m: &std::collections::HashMap<String, Vec<Value>>) -> bool {
+    matches!(
+        m.get("image-rendering").and_then(|v| v.first()),
+        Some(Value::Keyword(k)) if k == "pixelated"
+    )
 }
 
 fn is_float(b: &LayoutBox) -> bool {
@@ -1104,6 +1195,97 @@ mod tests {
         assert_eq!(canvas.pixel(9, 5), [0, 0, 255]);
         assert_eq!(canvas.pixel(2, 4), [0, 255, 0]);
         assert_eq!(canvas.pixel(1, 0), [255, 0, 0]);
+    }
+
+    #[test]
+    fn background_size_cover() {
+        let dom = parse_html("<html><div></div></html>");
+        let sheet = parse_css(
+            "div { width: 10px; height: 10px; background: url(t.png) no-repeat; background-size: cover }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let imgs = tile_store();
+        let tree = layout(&styled, 100.0).unwrap();
+        let canvas = paint_with(&tree, 100.0, &imgs);
+        assert_eq!(canvas.pixel(0, 0), [255, 0, 0]);
+        assert_eq!(canvas.pixel(9, 9), [255, 255, 0]);
+        assert_eq!(canvas.pixel(5, 5), [133, 153, 61]);
+    }
+
+    #[test]
+    fn background_size_contain() {
+        let dom = parse_html("<html><div></div></html>");
+        let sheet = parse_css(
+            "div { width: 10px; height: 4px; background: url(t.png) no-repeat; background-size: contain }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let imgs = tile_store();
+        let tree = layout(&styled, 100.0).unwrap();
+        let canvas = paint_with(&tree, 100.0, &imgs);
+        assert_eq!(canvas.pixel(0, 0), [255, 0, 0]);
+        assert_eq!(canvas.pixel(3, 0), [0, 255, 0]);
+        assert_eq!(canvas.pixel(0, 3), [0, 0, 255]);
+        assert_eq!(canvas.pixel(4, 0), [255, 255, 255]);
+        assert_eq!(canvas.pixel(0, 4), [255, 255, 255]);
+    }
+
+    #[test]
+    fn background_size_lengths_tile() {
+        let dom = parse_html("<html><div></div></html>");
+        let sheet = parse_css(
+            "div { width: 10px; height: 10px; background: url(t.png) repeat; background-size: 4px 2px }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let imgs = tile_store();
+        let tree = layout(&styled, 100.0).unwrap();
+        let canvas = paint_with(&tree, 100.0, &imgs);
+        assert_eq!(canvas.pixel(0, 0), [255, 0, 0]);
+        assert_eq!(canvas.pixel(4, 2), [255, 0, 0]);
+        assert_eq!(canvas.pixel(8, 6), [255, 0, 0]);
+    }
+
+    #[test]
+    fn background_size_percent() {
+        let dom = parse_html("<html><div></div></html>");
+        let sheet = parse_css(
+            "div { width: 10px; height: 10px; background: url(t.png) no-repeat; background-size: 100% 100% }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let imgs = tile_store();
+        let tree = layout(&styled, 100.0).unwrap();
+        let canvas = paint_with(&tree, 100.0, &imgs);
+        assert_eq!(canvas.pixel(0, 0), [255, 0, 0]);
+        assert_eq!(canvas.pixel(9, 9), [255, 255, 0]);
+    }
+
+    #[test]
+    fn background_size_one_keeps_ratio() {
+        let dom = parse_html("<html><div></div></html>");
+        let sheet = parse_css(
+            "div { width: 10px; height: 10px; background: url(t.png) no-repeat; background-size: 4px }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let imgs = tile_store();
+        let tree = layout(&styled, 100.0).unwrap();
+        let canvas = paint_with(&tree, 100.0, &imgs);
+        assert_eq!(canvas.pixel(0, 0), [255, 0, 0]);
+        assert_eq!(canvas.pixel(3, 3), [255, 255, 0]);
+        assert_eq!(canvas.pixel(4, 4), [255, 255, 255]);
+    }
+
+    #[test]
+    fn background_size_shorthand_slash() {
+        let dom = parse_html("<html><div></div></html>");
+        let sheet = parse_css(
+            "div { width: 10px; height: 10px; background: url(t.png) no-repeat center / 6px 6px }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let imgs = tile_store();
+        let tree = layout(&styled, 100.0).unwrap();
+        let canvas = paint_with(&tree, 100.0, &imgs);
+        assert_eq!(canvas.pixel(2, 2), [255, 0, 0]);
+        assert_eq!(canvas.pixel(1, 2), [255, 255, 255]);
+        assert_eq!(canvas.pixel(7, 7), [255, 255, 0]);
     }
 
     #[test]
