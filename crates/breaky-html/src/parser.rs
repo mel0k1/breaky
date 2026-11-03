@@ -165,7 +165,6 @@ fn attach_top(stack: &mut Vec<Node>, doc: &mut Node, node: Node) {
 
 fn flush(stack: &mut Vec<Node>, doc: &mut Node, text: &mut String) {
     let t = std::mem::take(text);
-    let t = t.trim().to_string();
     if !t.is_empty() {
         attach_top(stack, doc, Node::new(NodeKind::Text(t)));
     }
@@ -212,6 +211,18 @@ mod tests {
         assert_eq!(
             ul.children[1].children[0],
             Node::new(NodeKind::Text("b".into()))
+        );
+    }
+
+    #[test]
+    fn keeps_edge_spaces() {
+        let doc = parse("<p>a <b> b </b> c</p>");
+        let p = find_el(&doc, "p");
+        assert_eq!(p.children[0], Node::new(NodeKind::Text("a ".into())));
+        assert_eq!(p.children[2], Node::new(NodeKind::Text(" c".into())));
+        assert_eq!(
+            p.children[1].children[0],
+            Node::new(NodeKind::Text(" b ".into()))
         );
     }
 

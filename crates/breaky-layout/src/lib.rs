@@ -260,24 +260,32 @@ fn float_side(styled: &StyledNode) -> Option<Side> {
 
 fn block_children<'a>(styled: &'a StyledNode<'a>) -> Vec<LayoutBox<'a>> {
     let mut out: Vec<LayoutBox<'a>> = Vec::new();
+    let mut run: Vec<LayoutBox<'a>> = Vec::new();
     for c in &styled.children {
         for b in boxes_for(c) {
             if matches!(b.kind, BoxKind::Inline(_)) {
-                match out.last_mut() {
-                    Some(last) if matches!(last.kind, BoxKind::Anonymous) => last.children.push(b),
-                    _ => out.push(LayoutBox {
-                        dims: Dimensions::default(),
-                        kind: BoxKind::Anonymous,
-                        text: None,
-                        children: vec![b],
-                    }),
-                }
+                run.push(b);
             } else {
+                flush_run(&mut out, &mut run);
                 out.push(b);
             }
         }
     }
+    flush_run(&mut out, &mut run);
     out
+}
+
+fn flush_run<'a>(out: &mut Vec<LayoutBox<'a>>, run: &mut Vec<LayoutBox<'a>>) {
+    if run.iter().any(|b| b.text != Some(" ")) {
+        out.push(LayoutBox {
+            dims: Dimensions::default(),
+            kind: BoxKind::Anonymous,
+            text: None,
+            children: std::mem::take(run),
+        });
+    } else {
+        run.clear();
+    }
 }
 
 fn display(styled: &StyledNode) -> Display {
@@ -1308,5 +1316,29 @@ mod tests {
         assert!(eq(div.dims.padding.left, 4.0));
         let p = find(div, "p");
         assert!(eq(p.dims.content.x, 12.0));
+    }
+
+    #[test]
+    fn space_before_inline_kept() {
+        let dom = parse_html("<html><p>ab <b>cd</b></p></html>");
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let p = find(&root, "p");
+        let anon = &p.children[0];
+        let b = find(anon, "b");
+        let want = font::width("ab", 16.0) + font::width(" ", 16.0);
+        assert!(eq(b.dims.content.x, want));
+    }
+
+    #[test]
+    fn ws_only_run_between_blocks_dropped() {
+        let dom = parse_html("<html><div>\n<p>a</p>\n<p>b</p>\n</div></html>");
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let div = find(&root, "div");
+        assert_eq!(div.children.len(), 2);
+        assert!(eq(find(div, "p").dims.content.y, 0.0));
     }
 }
