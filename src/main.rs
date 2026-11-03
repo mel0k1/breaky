@@ -36,6 +36,10 @@ fn main() {
         gather_images(&styled, &mut urls);
         let base_css = Path::new(css).parent().unwrap_or(Path::new("."));
         load_local_images(&urls, base_css, &mut imgs);
+        let mut srcs: Vec<String> = Vec::new();
+        gather_dom_images(&dom, &mut srcs);
+        let base_html = Path::new(path).parent().unwrap_or(Path::new("."));
+        load_local_images(&srcs, base_html, &mut imgs);
         if let Some(tree) = layout::layout_with(&styled, viewport, &imgs) {
             println!();
             layout::print_tree(&tree, 0);
@@ -79,6 +83,13 @@ fn fetch(args: &[String]) {
     let mut imgs = img::Store::new();
     let mut urls: Vec<String> = Vec::new();
     gather_images(&styled, &mut urls);
+    let mut srcs: Vec<String> = Vec::new();
+    gather_dom_images(&dom, &mut srcs);
+    for s in srcs {
+        if !urls.iter().any(|u| u == &s) {
+            urls.push(s);
+        }
+    }
     load_remote_images(&urls, &base, &mut imgs);
     if let Some(tree) = layout::layout_with(&styled, viewport, &imgs) {
         println!();
@@ -103,6 +114,21 @@ fn gather_images(node: &StyledNode, out: &mut Vec<String>) {
     }
     for c in &node.children {
         gather_images(c, out);
+    }
+}
+
+fn gather_dom_images(node: &Node, out: &mut Vec<String>) {
+    if let NodeKind::Element { name, attrs } = &node.kind {
+        if name == "img" {
+            if let Some((_, src)) = attrs.iter().find(|(k, _)| k == "src") {
+                if !src.is_empty() && !out.iter().any(|x| x == src) {
+                    out.push(src.clone());
+                }
+            }
+        }
+    }
+    for c in &node.children {
+        gather_dom_images(c, out);
     }
 }
 

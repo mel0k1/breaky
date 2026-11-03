@@ -79,6 +79,7 @@ pub struct LayoutBox<'a> {
     pub marker: Option<&'a str>,
     pub marker_img: Option<&'a str>,
     pub marker_size: (f32, f32),
+    pub img: Option<(&'a str, f32, f32, Option<f32>, Option<f32>)>,
     pub children: Vec<LayoutBox<'a>>,
     pub abs: Vec<LayoutBox<'a>>,
     ws: WS,
@@ -241,6 +242,7 @@ fn build_root<'a>(
             marker: None,
             marker_img: None,
             marker_size: (0.0, 0.0),
+            img: None,
             ws: WS::Normal,
             align: Align::Left,
             strut: 0.0,
@@ -283,8 +285,17 @@ fn build_node<'a>(
             } else {
                 float_side(styled)
             };
+            let img = element_img(styled, imgs);
             let kind = if oof || float.is_some() {
                 BoxKind::Block(styled)
+            } else if img.is_some() {
+                match display(styled) {
+                    Display::Flex => BoxKind::Flex(styled),
+                    Display::TableCell => BoxKind::TableCell(styled),
+                    Display::Block | Display::ListItem | Display::TableCaption
+                    | Display::TableRow | Display::RowGroup => BoxKind::Block(styled),
+                    _ => BoxKind::InlineBlock(styled),
+                }
             } else if inline_ctx {
                 BoxKind::Inline(styled)
             } else {
@@ -338,6 +349,7 @@ fn build_node<'a>(
                     marker,
                     marker_img,
                     marker_size,
+                    img,
                     abs: my_abs,
                     children: group_blocks(flow, Some(styled)),
                     ws: ws_of(styled),
@@ -363,6 +375,7 @@ fn build_node<'a>(
                     marker,
                     marker_img,
                     marker_size,
+                    img,
                     abs: my_abs,
                     children,
                     ws: ws_of(styled),
@@ -466,6 +479,7 @@ fn word_box<'a>(styled: &'a StyledNode<'a>, text: &'a str, ws: WS) -> LayoutBox<
         marker: None,
         marker_img: None,
             marker_size: (0.0, 0.0),
+        img: None,
         ws,
         align: Align::Left,
         strut: 0.0,
@@ -640,6 +654,31 @@ fn own_font(styled: &StyledNode) -> f32 {
         .unwrap_or(BASE_FONT)
 }
 
+fn element_img<'a>(
+    styled: &'a StyledNode<'a>,
+    imgs: &img::Store,
+) -> Option<(&'a str, f32, f32, Option<f32>, Option<f32>)> {
+    if styled.node.name() != Some("img") {
+        return None;
+    }
+    let attrs = match &styled.node.kind {
+        NodeKind::Element { attrs, .. } => attrs,
+        _ => return None,
+    };
+    let src = attrs.iter().find(|(k, _)| k == "src").map(|(_, v)| v.as_str())?;
+    let im = imgs.get(src)?;
+    let mut aw = None;
+    let mut ah = None;
+    for (k, v) in attrs {
+        match k.as_str() {
+            "width" => aw = v.trim().parse::<f32>().ok(),
+            "height" => ah = v.trim().parse::<f32>().ok(),
+            _ => {}
+        }
+    }
+    Some((src, im.width as f32, im.height as f32, aw, ah))
+}
+
 fn list_image<'a>(styled: &'a StyledNode<'a>) -> Option<&'a str> {
     match styled
         .computed
@@ -723,6 +762,7 @@ fn build_table<'a>(
         marker: None,
         marker_img: None,
             marker_size: (0.0, 0.0),
+        img: None,
         abs: Vec::new(),
         children: top,
         ws: ws_of(styled),
@@ -753,6 +793,7 @@ fn build_row<'a>(
                 marker: None,
                 marker_img: None,
             marker_size: (0.0, 0.0),
+                img: None,
                 abs: Vec::new(),
                 children: group_blocks(cf, None),
                 ws: WS::Normal,
@@ -768,6 +809,7 @@ fn build_row<'a>(
         marker: None,
         marker_img: None,
             marker_size: (0.0, 0.0),
+        img: None,
         abs: Vec::new(),
         children: cells,
         ws: ws_of(styled),
@@ -788,6 +830,7 @@ fn flush_cells<'a>(rows: &mut Vec<LayoutBox<'a>>, cells: &mut Vec<LayoutBox<'a>>
         marker: None,
         marker_img: None,
             marker_size: (0.0, 0.0),
+        img: None,
         abs: Vec::new(),
         children: std::mem::take(cells),
         ws: WS::Normal,
@@ -829,6 +872,7 @@ fn flush_run<'a>(
             marker: None,
             marker_img: None,
             marker_size: (0.0, 0.0),
+            img: None,
             ws: styled.map(ws_of).unwrap_or(WS::Normal),
             align: styled.map(align_of).unwrap_or(Align::Left),
             strut: styled.map(strut_of).unwrap_or(0.0),
@@ -865,7 +909,7 @@ fn default_display(name: &str) -> Display {
         "head" | "title" | "meta" | "link" | "style" | "script" | "noscript" | "template"
         | "col" | "colgroup" => Display::None,
         "a" | "b" | "i" | "s" | "u" | "em" | "strong" | "span" | "code" | "small" | "sub"
-        | "sup" | "label" | "br" => Display::Inline,
+        | "sup" | "label" | "br" | "img" => Display::Inline,
         "li" => Display::ListItem,
         "table" => Display::Table,
         "tr" => Display::TableRow,
@@ -1681,6 +1725,11 @@ impl<'a> LayoutBox<'a> {
             }
         }
         self.stack_children(floats, font, explicit.is_none(), can_top, can_top);
+        if explicit.is_none() {
+            if let Some((_, ih)) = self.img_dims(font, flow.width) {
+                self.dims.content.height = ih;
+            }
+        }
     }
 
     fn stack_children(
@@ -2142,7 +2191,12 @@ impl<'a> LayoutBox<'a> {
             (None, a, b) => {
                 let l = a.unwrap_or(0.0);
                 let r = b.unwrap_or(0.0);
-                (l, r, rest(l + r).max(0.0))
+                let fill = rest(l + r).max(0.0);
+                let w = self
+                    .img_dims(font, avail)
+                    .map(|(iw, _)| iw.min(fill))
+                    .unwrap_or(fill);
+                (l, r, w)
             }
             (Some(w), None, None) => {
                 let half = rest(w) / 2.0;
@@ -2156,6 +2210,20 @@ impl<'a> LayoutBox<'a> {
         self.dims.content.width = width;
     }
 
+    fn img_dims(&self, font: f32, base: f32) -> Option<(f32, f32)> {
+        let (_, nw, nh, aw, ah) = self.img?;
+        let nw = nw.max(1.0);
+        let nh = nh.max(1.0);
+        let w = self.num("width", font, base).or(aw);
+        let h = self.num("height", font, base).or(ah);
+        Some(match (w, h) {
+            (Some(w), Some(h)) => (w, h),
+            (Some(w), None) => (w, w * nh / nw),
+            (None, Some(h)) => (h * nw / nh, h),
+            (None, None) => (nw, nh),
+        })
+    }
+
     fn measure_w(&self, parent_font: f32, base: f32) -> f32 {
         let font = self.font(parent_font);
         if let Some(t) = self.text {
@@ -2164,12 +2232,15 @@ impl<'a> LayoutBox<'a> {
         let m = self.edges(Family::Margin, font, base);
         let b = self.edges(Family::Border, font, base);
         let p = self.edges(Family::Padding, font, base);
-        let w = self.num("width", font, base).unwrap_or_else(|| {
-            self.children
-                .iter()
-                .map(|c| c.measure_w(font, base))
-                .sum::<f32>()
-        });
+        let w = match self.img_dims(font, base) {
+            Some((iw, _)) => iw,
+            None => self.num("width", font, base).unwrap_or_else(|| {
+                self.children
+                    .iter()
+                    .map(|c| c.measure_w(font, base))
+                    .sum::<f32>()
+            }),
+        };
         m.left + m.right + b.left + b.right + p.left + p.right + w
     }
 
@@ -2180,7 +2251,9 @@ impl<'a> LayoutBox<'a> {
         let m = self.edges(Family::Margin, font, base);
         let b = self.edges(Family::Border, font, base);
         let p = self.edges(Family::Padding, font, base);
-        let inner = match self.num("width", font, base) {
+        let inner = match self.img_dims(font, base) {
+            Some((iw, _)) => iw,
+            None => match self.num("width", font, base) {
             Some(w) => w,
             None => match self.kind {
                 BoxKind::Block(_)
@@ -2195,6 +2268,7 @@ impl<'a> LayoutBox<'a> {
                     .iter()
                     .map(|c| c.max_content_w(font, base))
                     .sum::<f32>(),
+            },
             },
         };
         m.left + m.right + b.left + b.right + p.left + p.right + inner
@@ -2219,7 +2293,11 @@ impl<'a> LayoutBox<'a> {
         let used = self.dims.margin.left + self.dims.margin.right + fixed;
         let room = (avail - used).max(0.0);
         let pref = (self.max_content_w(font, avail) - used).max(0.0);
-        self.dims.content.width = self.num("width", font, avail).unwrap_or(pref.min(room));
+        let idim = self.img_dims(font, avail);
+        self.dims.content.width = match (idim, self.num("width", font, avail)) {
+            (Some((iw, _)), None) => iw.min(room),
+            (_, cw) => cw.unwrap_or(pref.min(room)),
+        };
         self.dims.content.x =
             x + self.dims.margin.left + self.dims.border.left + self.dims.padding.left;
         self.dims.content.y =
@@ -2229,6 +2307,11 @@ impl<'a> LayoutBox<'a> {
             self.dims.content.height = h;
         }
         self.stack_children(floats, font, explicit.is_none(), false, false);
+        if explicit.is_none() {
+            if let Some((_, ih)) = idim {
+                self.dims.content.height = ih;
+            }
+        }
     }
 
     fn place_abs(&mut self, cb: Rect, parent_font: f32) {
@@ -2342,7 +2425,11 @@ impl<'a> LayoutBox<'a> {
         let m = self.edges(Family::Margin, font, base);
         let b = self.edges(Family::Border, font, base);
         let p = self.edges(Family::Padding, font, base);
-        m.top + m.bottom + b.top + b.bottom + p.top + p.bottom + self.line_height(font)
+        let content = match self.img_dims(font, base) {
+            Some((_, ih)) => ih,
+            None => self.line_height(font),
+        };
+        m.top + m.bottom + b.top + b.bottom + p.top + p.bottom + content
     }
 }
 
@@ -4434,5 +4521,118 @@ mod tests {
         let styled = style_build(&dom, &sheet);
         let root = layout(&styled, 200.0).unwrap();
         assert!(eq(root.children[1].dims.content.x, 30.0));
+    }
+
+    fn deep<'a>(b: &'a LayoutBox<'a>, name: &str) -> Vec<&'a LayoutBox<'a>> {
+        let mut out = Vec::new();
+        walk(b, name, &mut out);
+        out
+    }
+
+    fn walk<'a>(b: &'a LayoutBox<'a>, name: &str, out: &mut Vec<&'a LayoutBox<'a>>) {
+        if tag(b) == name {
+            out.push(b);
+        }
+        for c in &b.children {
+            walk(c, name, out);
+        }
+    }
+
+    fn img_store() -> img::Store {
+        let mut imgs = img::Store::new();
+        imgs.insert(
+            "p.png".into(),
+            img::Image {
+                width: 4,
+                height: 2,
+                data: vec![0; 32],
+            },
+        );
+        imgs
+    }
+
+    #[test]
+    fn img_natural_size() {
+        let dom = parse_html("<html><body><img src=\"p.png\"></body></html>");
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let imgs = img_store();
+        let root = layout_with(&styled, 200.0, &imgs).unwrap();
+        let im = &deep(&root, "img")[0];
+        assert!(matches!(im.kind, BoxKind::InlineBlock(_)));
+        assert!(eq(im.dims.content.width, 4.0));
+        assert!(eq(im.dims.content.height, 2.0));
+    }
+
+    #[test]
+    fn img_attr_size() {
+        let dom = parse_html(
+            "<html><body><img src=\"p.png\" width=\"6\" height=\"4\"><img src=\"p.png\" width=\"8\"></body></html>",
+        );
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let imgs = img_store();
+        let root = layout_with(&styled, 200.0, &imgs).unwrap();
+        let found = deep(&root, "img");
+        assert!(eq(found[0].dims.content.width, 6.0));
+        assert!(eq(found[0].dims.content.height, 4.0));
+        assert!(eq(found[1].dims.content.width, 8.0));
+        assert!(eq(found[1].dims.content.height, 4.0));
+    }
+
+    #[test]
+    fn img_css_overrides() {
+        let dom = parse_html("<html><body><img src=\"p.png\"></body></html>");
+        let sheet = parse_css("img { width: 10px; height: 6px }");
+        let styled = style_build(&dom, &sheet);
+        let imgs = img_store();
+        let root = layout_with(&styled, 200.0, &imgs).unwrap();
+        let im = &deep(&root, "img")[0];
+        assert!(eq(im.dims.content.width, 10.0));
+        assert!(eq(im.dims.content.height, 6.0));
+        let sheet = parse_css("img { width: 8px }");
+        let styled = style_build(&dom, &sheet);
+        let root = layout_with(&styled, 200.0, &imgs).unwrap();
+        let im = &deep(&root, "img")[0];
+        assert!(eq(im.dims.content.width, 8.0));
+        assert!(eq(im.dims.content.height, 4.0));
+    }
+
+    #[test]
+    fn img_missing_stays_empty() {
+        let dom = parse_html("<html><body><img src=\"nope.png\"></body></html>");
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let imgs = img_store();
+        let root = layout_with(&styled, 200.0, &imgs).unwrap();
+        let im = &deep(&root, "img")[0];
+        assert!(eq(im.dims.content.width, 0.0));
+    }
+
+    #[test]
+    fn img_in_inline_flow() {
+        let dom = parse_html(
+            "<html><body><p>a<img src=\"p.png\" width=\"4\" height=\"2\">b</p></body></html>",
+        );
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let imgs = img_store();
+        let root = layout_with(&styled, 200.0, &imgs).unwrap();
+        let im = &deep(&root, "img")[0];
+        assert!(eq(im.dims.content.x, font::width("a", 16.0)));
+        assert!(eq(im.dims.content.width, 4.0));
+    }
+
+    #[test]
+    fn img_display_block() {
+        let dom = parse_html("<html><body><img src=\"p.png\"></body></html>");
+        let sheet = parse_css("img { display: block }");
+        let styled = style_build(&dom, &sheet);
+        let imgs = img_store();
+        let root = layout_with(&styled, 200.0, &imgs).unwrap();
+        let im = &deep(&root, "img")[0];
+        assert!(matches!(im.kind, BoxKind::Block(_)));
+        assert!(eq(im.dims.content.width, 4.0));
+        assert!(eq(im.dims.content.height, 2.0));
     }
 }

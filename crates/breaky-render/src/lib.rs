@@ -103,6 +103,49 @@ impl Canvas {
         }
     }
 
+    pub fn image_scaled(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        img: &Image,
+        clip: Rect,
+        smooth: bool,
+    ) {
+        if w <= 0.0 || h <= 0.0 || img.width == 0 || img.height == 0 {
+            return;
+        }
+        let x0 = x.floor().max(0.0) as i64;
+        let y0 = y.floor().max(0.0) as i64;
+        let x1 = (x + w).ceil().min(self.width as f32) as i64;
+        let y1 = (y + h).ceil().min(self.height as f32) as i64;
+        for dy in y0..y1 {
+            for dx in x0..x1 {
+                let fx = dx as f32;
+                let fy = dy as f32;
+                if fx < clip.x
+                    || fx >= clip.x + clip.width
+                    || fy < clip.y
+                    || fy >= clip.y + clip.height
+                {
+                    continue;
+                }
+                let sx = (fx - x + 0.5) * img.width as f32 / w - 0.5;
+                let sy = (fy - y + 0.5) * img.height as f32 / h - 0.5;
+                let c = if smooth {
+                    sample_bilinear(img, sx, sy)
+                } else {
+                    sample_nearest(img, sx, sy)
+                };
+                if c.a == 0 {
+                    continue;
+                }
+                self.blend(dx, dy, c);
+            }
+        }
+    }
+
     pub fn to_png(&self) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
@@ -160,8 +203,80 @@ fn max_bottom(b: &LayoutBox) -> f32 {
     m
 }
 
+fn sample_nearest(img: &Image, sx: f32, sy: f32) -> Color {
+    let x = sx.round().clamp(0.0, img.width as f32 - 1.0) as u32;
+    let y = sy.round().clamp(0.0, img.height as f32 - 1.0) as u32;
+    let [r, g, b, a] = img.pixel(x, y);
+    Color { r, g, b, a }
+}
+
+fn sample_bilinear(img: &Image, sx: f32, sy: f32) -> Color {
+    let sx = sx.clamp(0.0, img.width as f32 - 1.0);
+    let sy = sy.clamp(0.0, img.height as f32 - 1.0);
+    let x0 = sx.floor() as u32;
+    let y0 = sy.floor() as u32;
+    let x1 = (x0 + 1).min(img.width - 1);
+    let y1 = (y0 + 1).min(img.height - 1);
+    let fx = sx - x0 as f32;
+    let fy = sy - y0 as f32;
+    let ws = [
+        (img.pixel(x0, y0), (1.0 - fx) * (1.0 - fy)),
+        (img.pixel(x1, y0), fx * (1.0 - fy)),
+        (img.pixel(x0, y1), (1.0 - fx) * fy),
+        (img.pixel(x1, y1), fx * fy),
+    ];
+    let mut a = 0f32;
+    let mut rgb = [0f32; 3];
+    for (c, wgt) in ws {
+        let al = c[3] as f32 / 255.0 * wgt;
+        a += al;
+        for k in 0..3 {
+            rgb[k] += c[k] as f32 * al;
+        }
+    }
+    if a <= 0.0 {
+        return Color { r: 0, g: 0, b: 0, a: 0 };
+    }
+    Color {
+        r: (rgb[0] / a).round() as u8,
+        g: (rgb[1] / a).round() as u8,
+        b: (rgb[2] / a).round() as u8,
+        a: (a * 255.0).round() as u8,
+    }
+}
+
+fn paint_img(canvas: &mut Canvas, b: &LayoutBox, imgs: &img::Store) {
+    let (src, ..) = match b.img {
+        Some(v) => v,
+        None => return,
+    };
+    let im = match imgs.get(src) {
+        Some(im) => im,
+        None => return,
+    };
+    let c = b.dims.content;
+    if c.width <= 0.0 || c.height <= 0.0 {
+        return;
+    }
+    canvas.image_scaled(
+        c.x,
+        c.y,
+        c.width,
+        c.height,
+        im,
+        Rect {
+            x: f32::NEG_INFINITY,
+            y: f32::NEG_INFINITY,
+            width: f32::INFINITY,
+            height: f32::INFINITY,
+        },
+        true,
+    );
+}
+
 fn paint_box(canvas: &mut Canvas, b: &LayoutBox, imgs: &img::Store) {
     paint_bg(canvas, b, imgs);
+    paint_img(canvas, b, imgs);
     paint_text(canvas, b);
     paint_marker(canvas, b, imgs);
     for child in &b.children {
@@ -983,6 +1098,30 @@ mod tests {
         assert_eq!(canvas.pixel(9, 5), [0, 0, 255]);
         assert_eq!(canvas.pixel(2, 4), [0, 255, 0]);
         assert_eq!(canvas.pixel(1, 0), [255, 0, 0]);
+    }
+
+    #[test]
+    fn img_paints_scaled() {
+        let dom = parse_html("<html><body><img src=\"q.png\" width=\"4\" height=\"2\"></body></html>");
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let mut imgs = img::Store::new();
+        imgs.insert(
+            "q.png".into(),
+            img::Image {
+                width: 2,
+                height: 1,
+                data: vec![255, 0, 0, 255, 0, 0, 255, 255],
+            },
+        );
+        let tree = layout_with(&styled, 50.0, &imgs).unwrap();
+        let canvas = paint_with(&tree, 50.0, &imgs);
+        assert_eq!(canvas.pixel(0, 0), [255, 0, 0]);
+        assert_eq!(canvas.pixel(3, 0), [0, 0, 255]);
+        let mid = canvas.pixel(1, 0);
+        assert!(mid[0] > 100 && mid[0] < 255 && mid[2] > 0 && mid[2] < 100);
+        assert_eq!(canvas.pixel(0, 1), [255, 0, 0]);
+        assert_eq!(canvas.pixel(4, 0), [255, 255, 255]);
     }
 
     #[test]
