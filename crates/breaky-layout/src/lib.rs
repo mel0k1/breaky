@@ -1703,7 +1703,7 @@ impl<'a> LayoutBox<'a> {
             self.dims.content.height = h;
         }
         let can_top = !root && self.dims.border.top == 0.0 && self.dims.padding.top == 0.0;
-        if can_top {
+        if can_top && !self.is_inline_run() {
             if let Some(c) = self.children.iter().find(|c| c.float_side().is_none()) {
                 let cmt = c.peek_margin_top(font, flow.width);
                 self.dims.margin.top = self.dims.margin.top.max(cmt);
@@ -1732,6 +1732,14 @@ impl<'a> LayoutBox<'a> {
         }
     }
 
+    fn is_inline_run(&self) -> bool {
+        matches!(self.kind, BoxKind::Anonymous)
+            && self
+                .children
+                .iter()
+                .all(|c| matches!(c.kind, BoxKind::Inline(_) | BoxKind::InlineBlock(_)))
+    }
+
     fn stack_children(
         &mut self,
         floats: &mut Vec<(Side, Rect)>,
@@ -1740,12 +1748,7 @@ impl<'a> LayoutBox<'a> {
         can_bottom: bool,
         top_collapsed: bool,
     ) {
-        let inline_run = matches!(self.kind, BoxKind::Anonymous)
-            && self
-                .children
-                .iter()
-                .all(|c| matches!(c.kind, BoxKind::Inline(_) | BoxKind::InlineBlock(_)));
-        if inline_run {
+        if self.is_inline_run() {
             self.flow_lines(floats, font);
             return;
         }
@@ -4634,5 +4637,52 @@ mod tests {
         assert!(matches!(im.kind, BoxKind::Block(_)));
         assert!(eq(im.dims.content.width, 4.0));
         assert!(eq(im.dims.content.height, 2.0));
+    }
+
+    #[test]
+    fn img_cell_hugs_border_box() {
+        let dom = parse_html(
+            "<html><body><table><tr><td><img src=\"p.png\"></td></tr></table></body></html>",
+        );
+        let sheet = parse_css("img { margin: 2px; border: 1px solid black; padding: 1px }");
+        let styled = style_build(&dom, &sheet);
+        let imgs = img_store();
+        let root = layout_with(&styled, 200.0, &imgs).unwrap();
+        let td = &deep(&root, "td")[0];
+        let im = &deep(&root, "img")[0];
+        assert!(eq(td.dims.content.width, 12.0));
+        assert!(eq(td.dims.content.height, 10.0));
+        assert!(eq(im.dims.content.x, td.dims.content.x + 4.0));
+        assert!(eq(im.dims.content.y, td.dims.content.y + 4.0));
+        let tr = &deep(&root, "tr")[0];
+        assert!(eq(tr.dims.content.height, 10.0));
+        let table = &deep(&root, "table")[0];
+        assert!(eq(table.dims.content.width, 12.0));
+        assert!(eq(table.dims.content.height, 10.0));
+    }
+
+    #[test]
+    fn img_margins_stay_in_line_box() {
+        let dom = parse_html("<html><body><div><img src=\"p.png\"></div></body></html>");
+        let sheet = parse_css("img { margin: 2px; border: 1px solid black; padding: 1px }");
+        let styled = style_build(&dom, &sheet);
+        let imgs = img_store();
+        let root = layout_with(&styled, 200.0, &imgs).unwrap();
+        let div = &deep(&root, "div")[0];
+        let im = &deep(&root, "img")[0];
+        assert!(eq(div.dims.content.height, 10.0));
+        assert!(eq(im.dims.content.y, div.dims.content.y + 4.0));
+    }
+
+    #[test]
+    fn block_margin_still_collapses_through() {
+        let dom = parse_html("<html><body><div><p></p></div></body></html>");
+        let sheet = parse_css("p { margin: 6px 0 0; height: 4px }");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let div = &deep(&root, "div")[0];
+        let p = &deep(&root, "p")[0];
+        assert!(eq(p.dims.content.y, div.dims.content.y));
+        assert!(eq(div.dims.content.height, 4.0));
     }
 }
