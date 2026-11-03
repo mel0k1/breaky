@@ -95,11 +95,26 @@ enum Align {
     Justify,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Va {
+    Baseline,
+    Sub,
+    Super,
+    Top,
+    Bottom,
+    Middle,
+    TextTop,
+    TextBottom,
+    Len(f32),
+    Pct(f32),
+}
+
 struct Item {
     idx: usize,
     w: f32,
     above: f32,
     below: f32,
+    va: Va,
     space: bool,
     atomic: bool,
 }
@@ -426,6 +441,39 @@ fn align_of(styled: &StyledNode) -> Align {
     }
 }
 
+fn va_of(styled: &StyledNode, font: f32) -> Va {
+    if let Some(v) = styled
+        .computed
+        .get("vertical-align")
+        .and_then(|v| v.first())
+    {
+        return match v {
+            Value::Keyword(k) => match k.as_str() {
+                "sub" => Va::Sub,
+                "super" => Va::Super,
+                "top" => Va::Top,
+                "bottom" => Va::Bottom,
+                "middle" => Va::Middle,
+                "text-top" => Va::TextTop,
+                "text-bottom" => Va::TextBottom,
+                _ => k
+                    .trim_end_matches('%')
+                    .parse::<f32>()
+                    .map(Va::Pct)
+                    .unwrap_or(Va::Baseline),
+            },
+            Value::Length(n, Unit::Px) => Va::Len(*n),
+            Value::Length(n, Unit::Em) => Va::Len(n * font),
+            _ => Va::Baseline,
+        };
+    }
+    match styled.node.name() {
+        Some("sub") => Va::Sub,
+        Some("sup") => Va::Super,
+        _ => Va::Baseline,
+    }
+}
+
 fn strut_of(styled: &StyledNode) -> f32 {
     let font = styled
         .computed
@@ -676,7 +724,7 @@ impl<'a> LayoutBox<'a> {
         self.text == Some(" ") && matches!(self.ws, WS::Normal | WS::NoWrap)
     }
 
-    fn extent(&self, parent_font: f32, base: f32) -> (f32, f32, bool) {
+    fn extent(&self, parent_font: f32, parent_lh: f32, base: f32) -> (f32, f32, Va, bool) {
         let font = self.font(parent_font);
         let a = font::asc(font);
         let d = font::desc(font);
@@ -685,16 +733,31 @@ impl<'a> LayoutBox<'a> {
         let m = self.edges(Family::Margin, font, base);
         let b = self.edges(Family::Border, font, base);
         let p = self.edges(Family::Padding, font, base);
+        let va = self
+            .element()
+            .map(|s| va_of(s, font))
+            .unwrap_or(Va::Baseline);
+        let pa = font::asc(parent_font);
+        let pd = font::desc(parent_font);
+        let phl = (parent_lh - pa - pd) / 2.0;
+        let shift = match va {
+            Va::Baseline | Va::Top | Va::Bottom => 0.0,
+            Va::Len(n) => -n,
+            Va::Pct(k) => -k * lh / 100.0,
+            Va::Sub => 0.25 * font,
+            Va::Super => -0.25 * font,
+            Va::Middle => (a - d) / 2.0 - font::x_height(parent_font) / 2.0,
+            Va::TextTop => (hl + a) - (phl + pa),
+            Va::TextBottom => (phl + pd) - (lh - hl - a),
+        };
         if matches!(self.kind, BoxKind::InlineBlock(_)) {
-            let above = m.top + b.top + p.top + hl + a;
+            let above = m.top + b.top + p.top + hl + a - shift;
             let h = self.measure_h(parent_font, base);
-            (above, h - above, true)
+            (above, h - above, va, true)
         } else {
-            (
-                m.top + b.top + p.top + hl + a,
-                m.bottom + b.bottom + p.bottom + d + hl,
-                false,
-            )
+            let above = m.top + b.top + p.top + hl + a - shift;
+            let below = m.bottom + b.bottom + p.bottom + d + hl + shift;
+            (above, below, va, false)
         }
     }
 
@@ -823,20 +886,49 @@ impl<'a> LayoutBox<'a> {
         let full_r = full_l + self.dims.content.width;
         let top = self.dims.content.y;
         let align = self.align;
+        let parent_lh = if self.strut > 0.0 {
+            self.strut
+        } else {
+            font * 1.2
+        };
         let mut cy = top;
         let mut idx = 0;
         while idx < self.children.len() {
-            let (end, items, wrapped) =
-                self.collect(idx, floats, &mut cy, full_l, full_r, font);
+            let (end, items, wrapped) = self.collect(
+                idx,
+                floats,
+                &mut cy,
+                full_l,
+                full_r,
+                font,
+                parent_lh,
+            );
             if items.is_empty() {
                 idx = end;
                 continue;
             }
             let mut max_a = f32::NEG_INFINITY;
             let mut max_b = f32::NEG_INFINITY;
+            let mut any = false;
             for it in &items {
+                if matches!(it.va, Va::Top | Va::Bottom) {
+                    continue;
+                }
+                any = true;
                 max_a = max_a.max(it.above);
                 max_b = max_b.max(it.below);
+            }
+            if !any {
+                max_a = 0.0;
+                max_b = 0.0;
+            }
+            for it in &items {
+                let h = it.above + it.below;
+                match it.va {
+                    Va::Top => max_b = max_b.max(h - max_a),
+                    Va::Bottom => max_a = max_a.max(h - max_b),
+                    _ => {}
+                }
             }
             let line_h = max_a + max_b;
             let (l, r) = band(floats, cy, line_h, full_l, full_r);
@@ -858,9 +950,14 @@ impl<'a> LayoutBox<'a> {
             let mut restart_idx: Option<usize> = None;
             for it in &items {
                 let i = it.idx;
+                let y = match it.va {
+                    Va::Top => cy,
+                    Va::Bottom => cy + line_h - it.above - it.below,
+                    _ => baseline - it.above,
+                };
                 if it.atomic {
                     let avail = (r - pen).max(0.0);
-                    self.children[i].layout_atomic(pen, baseline - it.above, avail, floats, font);
+                    self.children[i].layout_atomic(pen, y, avail, floats, font);
                     let mb = self.children[i].dims.margin_box();
                     if !first && mb.x + mb.width > r {
                         cy += line_h;
@@ -880,7 +977,7 @@ impl<'a> LayoutBox<'a> {
                 } else {
                     let f = Flow {
                         x: pen,
-                        y: baseline - it.above,
+                        y,
                         width: (r - pen).max(0.0),
                         height: 0.0,
                     };
@@ -908,6 +1005,7 @@ impl<'a> LayoutBox<'a> {
         full_l: f32,
         full_r: f32,
         font: f32,
+        parent_lh: f32,
     ) -> (usize, Vec<Item>, bool) {
         let mut items: Vec<Item> = Vec::new();
         let mut width = 0.0;
@@ -931,7 +1029,7 @@ impl<'a> LayoutBox<'a> {
                 continue;
             }
             let mw = child.measure_w(font, full_r - full_l);
-            let (above, below, atomic) = child.extent(font, full_r - full_l);
+            let (above, below, va, atomic) = child.extent(font, parent_lh, full_r - full_l);
             let band_h = est.max(above + below);
             let (l, r) = band(floats, *cy, band_h, full_l, full_r);
             if items.is_empty() {
@@ -950,6 +1048,7 @@ impl<'a> LayoutBox<'a> {
                 w: mw,
                 above,
                 below,
+                va,
                 space,
                 atomic,
             });
@@ -1919,6 +2018,124 @@ mod tests {
         let p = find(&root, "p");
         let bb = &p.children[0].children[2];
         assert!(eq(bb.dims.content.x, font::width("aa", 16.0) + 6.0));
+    }
+
+    #[test]
+    fn vertical_align_super() {
+        let dom = parse_html("<html><p>x<b style=\"vertical-align:super\">y</b></p></html>");
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let p = find(&root, "p");
+        let anon = &p.children[0];
+        let x = &anon.children[0];
+        let b = find(anon, "b");
+        assert!(eq(x.dims.content.y - b.dims.content.y, 4.0));
+        assert!(eq(anon.dims.content.height, 23.2));
+    }
+
+    #[test]
+    fn vertical_align_sub() {
+        let dom = parse_html("<html><p>x<span style=\"vertical-align:sub\">y</span></p></html>");
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let p = find(&root, "p");
+        let anon = &p.children[0];
+        let x = &anon.children[0];
+        let span = find(anon, "span");
+        assert!(eq(span.dims.content.y - x.dims.content.y, 4.0));
+    }
+
+    #[test]
+    fn vertical_align_length_raises() {
+        let dom = parse_html("<html><p>x<span style=\"vertical-align:3px\">y</span></p></html>");
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let p = find(&root, "p");
+        let anon = &p.children[0];
+        let x = &anon.children[0];
+        let span = find(anon, "span");
+        assert!(eq(x.dims.content.y - span.dims.content.y, 3.0));
+    }
+
+    #[test]
+    fn vertical_align_percent_of_line_height() {
+        let dom = parse_html("<html><p>x<span style=\"vertical-align:50%\">y</span></p></html>");
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let p = find(&root, "p");
+        let anon = &p.children[0];
+        let x = &anon.children[0];
+        let span = find(anon, "span");
+        assert!(eq(x.dims.content.y - span.dims.content.y, 9.6));
+    }
+
+    #[test]
+    fn sup_tag_defaults_to_super() {
+        let dom = parse_html("<html><p>x<sup>y</sup></p></html>");
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let p = find(&root, "p");
+        let anon = &p.children[0];
+        let x = &anon.children[0];
+        let sup = find(anon, "sup");
+        assert!(eq(x.dims.content.y - sup.dims.content.y, 4.0));
+    }
+
+    #[test]
+    fn vertical_align_bottom() {
+        let dom = parse_html("<html><p>x<b style=\"line-height:20px; vertical-align:bottom\">y</b></p></html>");
+        let sheet = parse_css("p { line-height: 40px }");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let p = find(&root, "p");
+        let anon = &p.children[0];
+        let b = find(anon, "b");
+        assert!(eq(b.dims.content.y, 20.0));
+        assert!(eq(anon.dims.content.height, 40.0));
+    }
+
+    #[test]
+    fn vertical_align_top() {
+        let dom = parse_html("<html><p>x<b style=\"line-height:40px; vertical-align:top\">y</b></p></html>");
+        let sheet = parse_css("p { line-height: 20px }");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let p = find(&root, "p");
+        let anon = &p.children[0];
+        let b = find(anon, "b");
+        assert!(eq(b.dims.content.y, 0.0));
+        assert!(eq(anon.dims.content.height, 40.0));
+    }
+
+    #[test]
+    fn vertical_align_text_top() {
+        let dom = parse_html("<html><p>x<span style=\"line-height:20px; vertical-align:text-top\">y</span></p></html>");
+        let sheet = parse_css("p { line-height: 40px }");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let p = find(&root, "p");
+        let anon = &p.children[0];
+        let x = &anon.children[0];
+        let span = find(anon, "span");
+        assert!(eq(span.dims.content.y, x.dims.content.y));
+    }
+
+    #[test]
+    fn vertical_align_middle() {
+        let dom = parse_html("<html><p>x<span style=\"vertical-align:middle\">y</span></p></html>");
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let p = find(&root, "p");
+        let anon = &p.children[0];
+        let x = &anon.children[0];
+        let span = find(anon, "span");
+        assert!(eq(x.dims.content.y - span.dims.content.y, 1.0));
     }
 
     #[test]
