@@ -901,6 +901,11 @@ impl<'a> LayoutBox<'a> {
         len_or(self.element()?.computed.get(key)?.first()?, font, base)
     }
 
+    fn num_h(&self, key: &str, font: f32, w: f32, h: Option<f32>) -> Option<f32> {
+        let v = self.element()?.computed.get(key)?.first()?;
+        flex_len(v, font, w, h)
+    }
+
     fn edges(&self, family: Family, font: f32, base: f32) -> Edges {
         let mut base4 = self.shorthand_base(family, font, base);
         let sides = ["top", "right", "bottom", "left"];
@@ -1327,6 +1332,11 @@ impl<'a> LayoutBox<'a> {
     ) {
         let inner_w = self.dims.content.width;
         let n = self.children.len();
+        let h_opt = if has_h {
+            Some(self.dims.content.height)
+        } else {
+            None
+        };
         let mut bases: Vec<f32> = Vec::new();
         let mut grows: Vec<f32> = Vec::new();
         let mut shrinks: Vec<f32> = Vec::new();
@@ -1338,7 +1348,7 @@ impl<'a> LayoutBox<'a> {
             let p = item.edges(Family::Padding, f, inner_w);
             let fx = m.left + m.right + b.left + b.right + p.left + p.right;
             let fy = m.top + m.bottom + b.top + b.bottom + p.top + p.bottom;
-            let basis = flex_basis(item, f, inner_w);
+            let basis = flex_basis(item, f, inner_w, Some(inner_w));
             let base = basis.unwrap_or_else(|| (item.max_content_w(f, inner_w) - fx).max(0.0));
             let (g, s) = flex_gs(item);
             bases.push(base);
@@ -1376,7 +1386,10 @@ impl<'a> LayoutBox<'a> {
                 + item.dims.margin.top
                 + item.dims.border.top
                 + item.dims.padding.top;
-            let ih = item.num("height", f, inner_w).is_some();
+            let ih = item.num_h("height", f, inner_w, h_opt).is_some();
+            if let Some(h) = item.num_h("height", f, inner_w, h_opt) {
+                item.dims.content.height = h;
+            }
             item.stack_children(floats, f, !ih, false, false);
             let mb = item.dims.margin_box();
             outer_h.push(mb.height);
@@ -1391,7 +1404,7 @@ impl<'a> LayoutBox<'a> {
         for i in 0..n {
             let item = &mut self.children[i];
             let f = item.font(font);
-            let ih_item = item.num("height", f, inner_w).is_some();
+            let ih_item = item.num_h("height", f, inner_w, h_opt).is_some();
             match align_self(item.element(), cont) {
                 AlignSelf::Stretch if !ih_item => {
                     item.dims.content.height = (inner_h - fixed[i].1).max(0.0);
@@ -1417,6 +1430,11 @@ impl<'a> LayoutBox<'a> {
     ) {
         let inner_w = self.dims.content.width;
         let n = self.children.len();
+        let h_opt = if has_h {
+            Some(self.dims.content.height)
+        } else {
+            None
+        };
         let mut bases: Vec<f32> = Vec::new();
         let mut grows: Vec<f32> = Vec::new();
         let mut shrinks: Vec<f32> = Vec::new();
@@ -1455,11 +1473,11 @@ impl<'a> LayoutBox<'a> {
                 _ => self.dims.content.x + m.left + b.left + p.left,
             };
             item.dims.content.y = self.dims.content.y + m.top + b.top + p.top;
-            let ih = item.num("height", f, inner_w).is_some();
+            let ih = item.num_h("height", f, inner_w, h_opt).is_some();
             item.stack_children(floats, f, !ih, false, false);
             let (g, s) = flex_gs(item);
-            let base = item
-                .num("height", f, inner_w)
+            let base = flex_basis(item, f, inner_w, h_opt)
+                .or_else(|| item.num_h("height", f, inner_w, h_opt))
                 .unwrap_or(item.dims.content.height);
             bases.push(base);
             grows.push(g);
@@ -2339,13 +2357,32 @@ fn flex_gs(item: &LayoutBox) -> (f32, f32) {
     (grow.unwrap_or(0.0), shrink.unwrap_or(1.0))
 }
 
-fn flex_basis(item: &LayoutBox, font: f32, base: f32) -> Option<f32> {
+fn flex_len(v: &Value, font: f32, w: f32, h: Option<f32>) -> Option<f32> {
+    match v {
+        Value::Keyword(k) if k.ends_with('%') => {
+            let p = k[..k.len() - 1].parse::<f32>().ok()?;
+            Some(p * h? / 100.0)
+        }
+        _ => len_or(v, font, w),
+    }
+}
+
+fn flex_basis(item: &LayoutBox, font: f32, w: f32, pct: Option<f32>) -> Option<f32> {
     let el = item.element()?;
+    let resolve = |v: &Value| -> Option<f32> {
+        match v {
+            Value::Keyword(k) if k.ends_with('%') => {
+                let p = k[..k.len() - 1].parse::<f32>().ok()?;
+                Some(p * pct? / 100.0)
+            }
+            _ => len_or(v, font, w),
+        }
+    };
     if let Some(v) = el.computed.get("flex-basis").and_then(|v| v.first()) {
         if matches!(v, Value::Keyword(k) if k == "auto") {
             return None;
         }
-        return len_or(v, font, base);
+        return resolve(v);
     }
     let vals = el.computed.get("flex")?;
     let mut any_num = false;
@@ -2362,7 +2399,7 @@ fn flex_basis(item: &LayoutBox, font: f32, base: f32) -> Option<f32> {
         }
     }
     match basis {
-        Some(v) => len_or(v, font, base),
+        Some(v) => resolve(v),
         None => {
             if any_num {
                 Some(0.0)
@@ -3902,5 +3939,81 @@ mod tests {
         assert_eq!(run.children.len(), 2);
         assert!(eq(run.children[1].dims.content.y, 0.0));
         assert!(eq(p.dims.content.height, 19.2));
+    }
+
+    #[test]
+    fn flex_basis_pct_row() {
+        let dom = parse_html(
+            "<html><div class=\"f\"><div class=\"a\"></div><div class=\"b\"></div></div></html>",
+        );
+        let sheet = parse_css(
+            ".f { display: flex; width: 200px } .a { flex-basis: 25% } .b { flex-basis: 75% }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let f = find(&root, "div");
+        assert!(eq(f.children[0].dims.content.width, 50.0));
+        assert!(eq(f.children[1].dims.content.width, 150.0));
+    }
+
+    #[test]
+    fn flex_basis_pct_grows() {
+        let dom = parse_html("<html><div class=\"f\"><div class=\"a\"></div></div></html>");
+        let sheet = parse_css(".f { display: flex; width: 200px } .a { flex-basis: 25%; flex-grow: 1 }");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let f = find(&root, "div");
+        assert!(eq(f.children[0].dims.content.width, 200.0));
+    }
+
+    #[test]
+    fn flex_basis_pct_column() {
+        let dom = parse_html("<html><div class=\"f\"><div class=\"a\"></div></div></html>");
+        let sheet = parse_css(
+            ".f { display: flex; flex-direction: column; width: 100px; height: 100px } .a { flex-basis: 50% }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let f = find(&root, "div");
+        assert!(eq(f.children[0].dims.content.height, 50.0));
+    }
+
+    #[test]
+    fn flex_item_pct_height() {
+        let dom = parse_html("<html><div class=\"f\"><div class=\"a\"></div></div></html>");
+        let sheet = parse_css(
+            ".f { display: flex; width: 100px; height: 80px; align-items: flex-start } .a { width: 20px; height: 50% }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let f = find(&root, "div");
+        assert!(eq(f.children[0].dims.content.height, 40.0));
+    }
+
+    #[test]
+    fn flex_item_pct_height_auto_container() {
+        let dom = parse_html("<html><div class=\"f\"><div class=\"a\"></div></div></html>");
+        let sheet = parse_css(
+            ".f { display: flex; width: 100px; align-items: flex-start } .a { width: 20px; height: 50% }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let f = find(&root, "div");
+        assert!(eq(f.children[0].dims.content.height, 0.0));
+    }
+
+    #[test]
+    fn flex_shrink_pct_basis() {
+        let dom = parse_html(
+            "<html><div class=\"f\"><div class=\"a\"></div><div class=\"b\"></div></div></html>",
+        );
+        let sheet = parse_css(
+            ".f { display: flex; width: 100px } .a { flex-basis: 60% } .b { flex-basis: 60% }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let f = find(&root, "div");
+        assert!(eq(f.children[0].dims.content.width, 50.0));
+        assert!(eq(f.children[1].dims.content.width, 50.0));
     }
 }
