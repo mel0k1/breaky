@@ -286,17 +286,18 @@ fn paint_bg(canvas: &mut Canvas, b: &LayoutBox, imgs: &img::Store) {
             if let Some(im) = imgs.get(&u) {
                 let pb = d.padding_box();
                 let (rw, rh) = (im.width as f32, im.height as f32);
+                let (ox, oy) = bg_offset(m, pb.width, pb.height, rw, rh);
                 let xs = match bg_repeat(m) {
-                    Repeat::Y | Repeat::None => vec![pb.x],
-                    _ => span(pb.x, pb.width, rw),
+                    Repeat::Y | Repeat::None => vec![ox],
+                    _ => span(ox, pb.width, rw),
                 };
                 let ys = match bg_repeat(m) {
-                    Repeat::X | Repeat::None => vec![pb.y],
-                    _ => span(pb.y, pb.height, rh),
+                    Repeat::X | Repeat::None => vec![oy],
+                    _ => span(oy, pb.height, rh),
                 };
                 for y in ys {
                     for x in &xs {
-                        canvas.image(*x, y, im, pb);
+                        canvas.image(pb.x + x, pb.y + y, im, pb);
                     }
                 }
             }
@@ -363,8 +364,88 @@ fn span(start: f32, total: f32, tile: f32) -> Vec<f32> {
     if tile <= 0.0 || total <= 0.0 {
         return vec![start];
     }
-    let n = (total / tile).ceil() as i64;
-    (0..n.max(1)).map(|i| start + i as f32 * tile).collect()
+    let mut out = Vec::new();
+    let mut x = start - tile * (start / tile).floor() - tile;
+    while x < total {
+        out.push(x);
+        x += tile;
+    }
+    out
+}
+
+#[derive(Clone, Copy)]
+enum Pos {
+    Len(f32),
+    Pct(f32),
+    Left,
+    Right,
+    Top,
+    Bottom,
+    Center,
+}
+
+fn pos_of(v: &Value, font: f32) -> Option<Pos> {
+    match v {
+        Value::Length(n, Unit::Px) => Some(Pos::Len(*n)),
+        Value::Length(n, Unit::Em) => Some(Pos::Len(n * font)),
+        Value::Keyword(k) => {
+            if let Some(p) = k.strip_suffix('%') {
+                return p.parse::<f32>().ok().map(Pos::Pct);
+            }
+            match k.as_str() {
+                "left" => Some(Pos::Left),
+                "right" => Some(Pos::Right),
+                "top" => Some(Pos::Top),
+                "bottom" => Some(Pos::Bottom),
+                "center" => Some(Pos::Center),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn bg_axis(p: Pos, extent: f32, tile: f32) -> f32 {
+    match p {
+        Pos::Len(n) => n,
+        Pos::Pct(k) => (extent - tile) * k / 100.0,
+        Pos::Left | Pos::Top => 0.0,
+        Pos::Right | Pos::Bottom => extent - tile,
+        Pos::Center => (extent - tile) / 2.0,
+    }
+}
+
+fn bg_offset(
+    m: &std::collections::HashMap<String, Vec<Value>>,
+    cw: f32,
+    ch: f32,
+    rw: f32,
+    rh: f32,
+) -> (f32, f32) {
+    let font = text_metrics(Some(m)).0;
+    let vals = m
+        .get("background-position")
+        .or_else(|| m.get("background"));
+    let mut x: Option<Pos> = None;
+    let mut y: Option<Pos> = None;
+    if let Some(vs) = vals {
+        for v in vs {
+            if let Some(p) = pos_of(v, font) {
+                if x.is_none() && !matches!(p, Pos::Top | Pos::Bottom) {
+                    x = Some(p);
+                } else if y.is_none() {
+                    y = Some(p);
+                }
+            }
+        }
+    }
+    let ox = x.map(|p| bg_axis(p, cw, rw)).unwrap_or(0.0);
+    let oy = match y {
+        Some(p) => bg_axis(p, ch, rh),
+        None if x.is_some() => (ch - rh) / 2.0,
+        None => 0.0,
+    };
+    (ox, oy)
 }
 
 fn bg_url(m: &std::collections::HashMap<String, Vec<Value>>) -> Option<String> {
@@ -817,6 +898,105 @@ mod tests {
         let canvas = paint_with(&tree, 100.0, &imgs);
         assert_eq!(canvas.pixel(5, 0), [255, 0, 0]);
         assert_eq!(canvas.pixel(5, 2), [255, 255, 255]);
+    }
+
+    fn tile_store() -> img::Store {
+        let mut imgs = img::Store::new();
+        imgs.insert(
+            "t.png".into(),
+            img::Image {
+                width: 2,
+                height: 2,
+                data: vec![
+                    255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255,
+                ],
+            },
+        );
+        imgs
+    }
+
+    #[test]
+    fn background_position_offsets() {
+        let dom = parse_html("<html><div></div></html>");
+        let sheet = parse_css(
+            "div { width: 10px; height: 10px; background: url(t.png) no-repeat; background-position: 6px 4px }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let imgs = tile_store();
+        let tree = layout(&styled, 100.0).unwrap();
+        let canvas = paint_with(&tree, 100.0, &imgs);
+        assert_eq!(canvas.pixel(6, 4), [255, 0, 0]);
+        assert_eq!(canvas.pixel(7, 4), [0, 255, 0]);
+        assert_eq!(canvas.pixel(6, 5), [0, 0, 255]);
+        assert_eq!(canvas.pixel(5, 4), [255, 255, 255]);
+        assert_eq!(canvas.pixel(6, 3), [255, 255, 255]);
+        assert_eq!(canvas.pixel(8, 6), [255, 255, 255]);
+    }
+
+    #[test]
+    fn background_position_percent() {
+        let dom = parse_html("<html><div></div></html>");
+        let sheet = parse_css(
+            "div { width: 10px; height: 10px; background: url(t.png) no-repeat; background-position: 100% 100% }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let imgs = tile_store();
+        let tree = layout(&styled, 100.0).unwrap();
+        let canvas = paint_with(&tree, 100.0, &imgs);
+        assert_eq!(canvas.pixel(8, 8), [255, 0, 0]);
+        assert_eq!(canvas.pixel(9, 9), [255, 255, 0]);
+        assert_eq!(canvas.pixel(7, 7), [255, 255, 255]);
+    }
+
+    #[test]
+    fn background_position_center_and_keywords() {
+        let dom = parse_html("<html><div></div></html>");
+        let sheet = parse_css(
+            "div { width: 10px; height: 10px; background: url(t.png) no-repeat; background-position: 50% 50% }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let imgs = tile_store();
+        let tree = layout(&styled, 100.0).unwrap();
+        let canvas = paint_with(&tree, 100.0, &imgs);
+        assert_eq!(canvas.pixel(4, 4), [255, 0, 0]);
+        let sheet = parse_css(
+            "div { width: 10px; height: 10px; background: url(t.png) no-repeat; background-position: right bottom }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let tree = layout(&styled, 100.0).unwrap();
+        let canvas = paint_with(&tree, 100.0, &imgs);
+        assert_eq!(canvas.pixel(8, 8), [255, 0, 0]);
+    }
+
+    #[test]
+    fn background_position_one_value_wraps() {
+        let dom = parse_html("<html><div></div></html>");
+        let sheet = parse_css(
+            "div { width: 10px; height: 10px; background: url(t.png); background-position: 3px }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let imgs = tile_store();
+        let tree = layout(&styled, 100.0).unwrap();
+        let canvas = paint_with(&tree, 100.0, &imgs);
+        assert_eq!(canvas.pixel(0, 4), [0, 255, 0]);
+        assert_eq!(canvas.pixel(1, 4), [255, 0, 0]);
+        assert_eq!(canvas.pixel(9, 5), [0, 0, 255]);
+        assert_eq!(canvas.pixel(2, 4), [0, 255, 0]);
+        assert_eq!(canvas.pixel(1, 0), [255, 0, 0]);
+    }
+
+    #[test]
+    fn background_position_em() {
+        let dom = parse_html("<html><div></div></html>");
+        let sheet = parse_css(
+            "div { width: 30px; height: 30px; background: url(t.png) no-repeat; background-position: 1em }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let imgs = tile_store();
+        let tree = layout(&styled, 100.0).unwrap();
+        let canvas = paint_with(&tree, 100.0, &imgs);
+        assert_eq!(canvas.pixel(16, 14), [255, 0, 0]);
+        assert_eq!(canvas.pixel(16, 13), [255, 255, 255]);
     }
 
     fn find_box<'a>(b: &'a LayoutBox<'a>, name: &str) -> Option<&'a LayoutBox<'a>> {
