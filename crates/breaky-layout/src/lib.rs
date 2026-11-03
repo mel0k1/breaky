@@ -398,6 +398,7 @@ fn position_kw(styled: &StyledNode) -> &'static str {
             "relative" => "relative",
             "absolute" => "absolute",
             "fixed" => "fixed",
+            "sticky" => "sticky",
             _ => "static",
         },
         _ => "static",
@@ -1700,7 +1701,8 @@ impl<'a> LayoutBox<'a> {
             return;
         }
         let mut prev: Option<(f32, f32)> = None;
-        for child in &mut self.children {
+        let mut stickies: Vec<usize> = Vec::new();
+        for (ci, child) in self.children.iter_mut().enumerate() {
             if let Some(s) = child.float_side() {
                 let y = match prev {
                     Some((bb, pmb)) => bb + pmb,
@@ -1733,6 +1735,13 @@ impl<'a> LayoutBox<'a> {
             let bb = child.dims.border_box();
             prev = Some((bb.y + bb.height, child.dims.margin.bottom));
             child.apply_relative(font, self.dims.content.width);
+            if child
+                .style()
+                .map(|st| position_kw(st) == "sticky")
+                .unwrap_or(false)
+            {
+                stickies.push(ci);
+            }
         }
         if set_height {
             self.dims.content.height = match prev {
@@ -1749,6 +1758,10 @@ impl<'a> LayoutBox<'a> {
                 }
                 None => 0.0,
             };
+        }
+        let cb = self.dims.content;
+        for &i in &stickies {
+            self.children[i].apply_sticky(cb, font, self.dims.content.width);
         }
         self.place_abs_children(font);
     }
@@ -2270,6 +2283,27 @@ impl<'a> LayoutBox<'a> {
         let dy = y_m + self.dims.margin.top + self.dims.border.top + self.dims.padding.top
             - self.dims.content.y;
         self.shift(0.0, dy);
+    }
+
+    fn apply_sticky(&mut self, cb: Rect, font: f32, base: f32) {
+        let bb = self.dims.border_box();
+        let mut dx = 0.0;
+        let mut dy = 0.0;
+        if let Some(t) = self.num("top", font, base) {
+            let stuck = t - bb.y;
+            if stuck > 0.0 {
+                let room = (cb.y + cb.height - (bb.y + bb.height)).max(0.0);
+                dy = stuck.min(room);
+            }
+        }
+        if let Some(l) = self.num("left", font, base) {
+            let stuck = l - bb.x;
+            if stuck > 0.0 {
+                let room = (cb.x + cb.width - (bb.x + bb.width)).max(0.0);
+                dx = stuck.min(room);
+            }
+        }
+        self.shift(dx, dy);
     }
 
     fn apply_relative(&mut self, font: f32, base: f32) {
@@ -4331,5 +4365,74 @@ mod tests {
         let plain = layout(&styled, 200.0).unwrap();
         let li2 = find(find(&plain, "ul"), "li");
         assert!(eq(li2.dims.content.x, 50.0));
+    }
+
+    #[test]
+    fn sticky_pushes_to_top_offset() {
+        let dom = parse_html(
+            "<html><div class=\"a\"></div><div class=\"s\"></div><div class=\"c\"></div></html>",
+        );
+        let sheet = parse_css(
+            ".a { height: 10px } .s { position: sticky; top: 20px; height: 10px } .c { height: 30px }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        assert!(eq(root.children[1].dims.content.y, 20.0));
+        assert!(eq(root.dims.content.height, 50.0));
+    }
+
+    #[test]
+    fn sticky_no_shift_when_clear() {
+        let dom = parse_html(
+            "<html><div class=\"a\"></div><div class=\"s\"></div><div class=\"c\"></div></html>",
+        );
+        let sheet = parse_css(
+            ".a { height: 10px } .s { position: sticky; top: 5px; height: 10px } .c { height: 30px }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        assert!(eq(root.children[1].dims.content.y, 10.0));
+    }
+
+    #[test]
+    fn sticky_clamped_to_container() {
+        let dom = parse_html(
+            "<html><div class=\"a\"></div><div class=\"s\"></div><div class=\"c\"></div></html>",
+        );
+        let sheet = parse_css(
+            ".a { height: 10px } .s { position: sticky; top: 100px; height: 10px } .c { height: 30px }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        assert!(eq(root.children[1].dims.content.y, 40.0));
+    }
+
+    #[test]
+    fn sticky_containing_block_for_absolute() {
+        let dom = parse_html(
+            "<html><div class=\"a\"></div><div class=\"s\"><div class=\"x\"></div></div><div class=\"c\"></div></html>",
+        );
+        let sheet = parse_css(
+            ".a { height: 10px } .s { position: sticky; top: 20px; height: 10px } .c { height: 30px } .x { position: absolute; left: 5px; top: 5px; width: 4px; height: 4px }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        assert!(eq(root.children[1].dims.content.y, 20.0));
+        assert_eq!(root.children[1].abs.len(), 1);
+        assert!(eq(root.children[1].abs[0].dims.content.x, 5.0));
+        assert!(eq(root.children[1].abs[0].dims.content.y, 25.0));
+    }
+
+    #[test]
+    fn sticky_left_offset() {
+        let dom = parse_html(
+            "<html><div class=\"a\"></div><div class=\"s\"></div><div class=\"c\"></div></html>",
+        );
+        let sheet = parse_css(
+            ".a { height: 10px } .s { position: sticky; left: 30px; width: 50px; height: 10px } .c { height: 30px }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        assert!(eq(root.children[1].dims.content.x, 30.0));
     }
 }
