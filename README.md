@@ -10,6 +10,7 @@ A browser engine in Rust. Educational, experimental.
 
 ```sh
 cargo run -- page.html [style.css] [width] [out.png]
+cargo run -- fetch http://example.com [width] [out.png]
 ```
 
 Prints the DOM tree, the styled tree with cascaded properties and the box
@@ -24,6 +25,7 @@ Workspace of small crates:
 - `breaky-style` — selector matching and cascade
 - `breaky-layout` — box tree and block/inline layout
 - `breaky-render` — PNG painter (hand-written encoder, zero deps)
+- `breaky-net` — HTTP client and URL resolution
 - `breaky` — CLI
 
 ## Roadmap
@@ -40,7 +42,7 @@ Workspace of small crates:
 - [x] Floats
 - [x] Rendering
 - [x] Text and fonts
-- [ ] Networking
+- [x] Networking
 
 ## License
 
