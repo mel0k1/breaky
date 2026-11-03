@@ -73,7 +73,9 @@ impl Canvas {
 
 pub fn paint(root: &LayoutBox, viewport_width: f32) -> Canvas {
     let bb = root.dims.border_box();
-    let height = (bb.y + bb.height).ceil().max(1.0) as u32;
+    let height = ((bb.y + bb.height).max(max_bottom(root))
+        .ceil()
+        .max(1.0)) as u32;
     let mut canvas = Canvas::new(viewport_width.max(1.0) as u32, height);
     if let Some(c) = computed(root).and_then(|m| token_color(m, "background-color")) {
         canvas.fill(
@@ -90,7 +92,30 @@ pub fn paint(root: &LayoutBox, viewport_width: f32) -> Canvas {
     canvas
 }
 
+fn max_bottom(b: &LayoutBox) -> f32 {
+    let bb = b.dims.border_box();
+    let mut m = bb.y + bb.height;
+    for c in &b.children {
+        m = m.max(max_bottom(c));
+    }
+    m
+}
+
 fn paint_box(canvas: &mut Canvas, b: &LayoutBox) {
+    paint_bg(canvas, b);
+    for child in &b.children {
+        if !is_float(child) {
+            paint_box(canvas, child);
+        }
+    }
+    for child in &b.children {
+        if is_float(child) {
+            paint_box(canvas, child);
+        }
+    }
+}
+
+fn paint_bg(canvas: &mut Canvas, b: &LayoutBox) {
     let d = &b.dims;
     let bb = d.border_box();
     if let Some(c) = computed(b).and_then(|m| token_color(m, "background-color")) {
@@ -143,8 +168,15 @@ fn paint_box(canvas: &mut Canvas, b: &LayoutBox) {
             c,
         );
     }
-    for child in &b.children {
-        paint_box(canvas, child);
+}
+
+fn is_float(b: &LayoutBox) -> bool {
+    match &b.kind {
+        BoxKind::Block(s) => matches!(
+            s.computed.get("float").and_then(|v| v.first()),
+            Some(Value::Keyword(k)) if k == "left" || k == "right"
+        ),
+        _ => false,
     }
 }
 
@@ -323,6 +355,20 @@ mod tests {
         let tree = layout(&styled, 100.0).unwrap();
         let canvas = paint(&tree, 100.0);
         assert_eq!(canvas.pixel(1, 1), [255, 255, 255]);
+    }
+
+    #[test]
+    fn float_paints_over_sibling_background() {
+        let dom = parse_html("<html><div class=\"f\"></div><p></p></html>");
+        let sheet = parse_css(
+            ".f { float: left; width: 50px; height: 40px; background-color: #00ff00 } p { width: 100px; height: 30px; background-color: #ffffff; margin: 0 }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let tree = layout(&styled, 100.0).unwrap();
+        let canvas = paint(&tree, 100.0);
+        assert_eq!(canvas.pixel(10, 10), [0, 255, 0]);
+        assert_eq!(canvas.pixel(60, 10), [255, 255, 255]);
+        assert_eq!(canvas.pixel(10, 35), [0, 255, 0]);
     }
 
     #[test]
