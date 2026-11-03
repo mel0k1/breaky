@@ -2,6 +2,7 @@ use std::env;
 use std::fs;
 use std::process::exit;
 
+use css::Value;
 use html::NodeKind;
 use style::{StyledNode, build};
 
@@ -19,9 +20,12 @@ fn main() {
 
 fn print_styled(node: &StyledNode, depth: usize) {
     if let NodeKind::Element { name, .. } = &node.node.kind {
-        let mut props: Vec<_> = node.specified.iter().collect();
-        props.sort();
-        let p: Vec<String> = props.iter().map(|(k, v)| format!("{}={}", k, v)).collect();
+        let mut props: Vec<_> = node.computed.iter().collect();
+        props.sort_by_key(|(k, _)| *k);
+        let p: Vec<String> = props
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, vals(v)))
+            .collect();
         let head = if p.is_empty() {
             format!("<{}>", name)
         } else {
@@ -32,6 +36,13 @@ fn print_styled(node: &StyledNode, depth: usize) {
     for c in &node.children {
         print_styled(c, depth + 1);
     }
+}
+
+fn vals(v: &[Value]) -> String {
+    v.iter()
+        .map(|x| x.to_string())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn fail<T>(e: std::io::Error) -> T {

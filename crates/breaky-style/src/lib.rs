@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 
-use css::{Rule, Selector, SimpleSelector, Stylesheet};
+use css::{Color, Rule, Selector, SimpleSelector, Stylesheet, Unit, Value};
 use html::{Node, NodeKind};
 
 #[derive(Debug, PartialEq)]
 pub struct StyledNode<'a> {
     pub node: &'a Node,
-    pub specified: HashMap<String, String>,
+    pub computed: HashMap<String, Vec<Value>>,
     pub children: Vec<StyledNode<'a>>,
 }
 
@@ -15,7 +15,7 @@ pub fn build<'a>(node: &'a Node, sheet: &Stylesheet) -> StyledNode<'a> {
 }
 
 fn build_rec<'a>(node: &'a Node, sheet: &Stylesheet, ancestors: &[&'a Node]) -> StyledNode<'a> {
-    let mut specified = HashMap::new();
+    let mut computed = HashMap::new();
     if matches!(node.kind, NodeKind::Element { .. }) {
         let mut matched: Vec<((usize, usize, usize), usize, &Rule)> = Vec::new();
         for (i, rule) in sheet.rules.iter().enumerate() {
@@ -32,7 +32,7 @@ fn build_rec<'a>(node: &'a Node, sheet: &Stylesheet, ancestors: &[&'a Node]) -> 
         matched.sort_by_key(|(spec, i, _)| (*spec, *i));
         for (_, _, rule) in &matched {
             for d in &rule.declarations {
-                specified.insert(d.name.clone(), d.value.clone());
+                computed.insert(d.name.clone(), d.value.clone());
             }
         }
     }
@@ -45,7 +45,7 @@ fn build_rec<'a>(node: &'a Node, sheet: &Stylesheet, ancestors: &[&'a Node]) -> 
         .collect();
     StyledNode {
         node,
-        specified,
+        computed,
         children,
     }
 }
@@ -110,14 +110,22 @@ mod tests {
             .unwrap()
     }
 
+    fn rgb(r: u8, g: u8, b: u8) -> Value {
+        Value::Color(Color { r, g, b, a: 255 })
+    }
+
+    fn px(n: f32) -> Value {
+        Value::Length(n, Unit::Px)
+    }
+
     #[test]
     fn specificity_and_order() {
         let dom = parse_html("<p id=\"a\" class=\"x\">t</p>");
         let sheet = parse_css("p { color: red } #a { color: green } .x { margin: 0 }");
         let s = build(&dom, &sheet);
         let p = el(&s, "p");
-        assert_eq!(p.specified["color"], "green");
-        assert_eq!(p.specified["margin"], "0");
+        assert_eq!(p.computed["color"], vec![rgb(0, 128, 0)]);
+        assert_eq!(p.computed["margin"], vec![px(0.0)]);
     }
 
     #[test]
@@ -125,7 +133,7 @@ mod tests {
         let dom = parse_html("<p>t</p>");
         let sheet = parse_css("p { color: red } p { color: blue }");
         let s = build(&dom, &sheet);
-        assert_eq!(el(&s, "p").specified["color"], "blue");
+        assert_eq!(el(&s, "p").computed["color"], vec![rgb(0, 0, 255)]);
     }
 
     #[test]
@@ -133,8 +141,8 @@ mod tests {
         let dom = parse_html("<div><p>a</p></div><p>b</p>");
         let sheet = parse_css("div p { color: red } p { color: blue }");
         let s = build(&dom, &sheet);
-        assert_eq!(el(el(&s, "div"), "p").specified["color"], "red");
-        assert_eq!(s.children[1].specified["color"], "blue");
+        assert_eq!(el(el(&s, "div"), "p").computed["color"], vec![rgb(255, 0, 0)]);
+        assert_eq!(s.children[1].computed["color"], vec![rgb(0, 0, 255)]);
     }
 
     #[test]
@@ -142,7 +150,7 @@ mod tests {
         let dom = parse_html("<p class=\"a b\">t</p>");
         let sheet = parse_css(".b { color: red }");
         let s = build(&dom, &sheet);
-        assert_eq!(el(&s, "p").specified["color"], "red");
+        assert_eq!(el(&s, "p").computed["color"], vec![rgb(255, 0, 0)]);
     }
 
     #[test]
@@ -151,8 +159,8 @@ mod tests {
         let sheet = parse_css("* { color: red }");
         let s = build(&dom, &sheet);
         let p = el(&s, "p");
-        assert_eq!(p.specified["color"], "red");
-        assert!(p.children[0].specified.is_empty());
+        assert_eq!(p.computed["color"], vec![rgb(255, 0, 0)]);
+        assert!(p.children[0].computed.is_empty());
     }
 
     #[test]
@@ -160,6 +168,9 @@ mod tests {
         let dom = parse_html("<div><section><p>t</p></section></div>");
         let sheet = parse_css("div p { color: red }");
         let s = build(&dom, &sheet);
-        assert_eq!(el(el(el(&s, "div"), "section"), "p").specified["color"], "red");
+        assert_eq!(
+            el(el(el(&s, "div"), "section"), "p").computed["color"],
+            vec![rgb(255, 0, 0)]
+        );
     }
 }
