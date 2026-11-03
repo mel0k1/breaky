@@ -373,38 +373,79 @@ impl<'a> LayoutBox<'a> {
     fn place(&mut self, flow: &Flow, parent_font: f32) {
         match self.kind {
             BoxKind::Inline(_) => self.place_inline(flow, parent_font),
-            _ => self.place_block(flow, parent_font),
+            _ => self.place_block(flow, parent_font, false),
         }
     }
 
-    fn place_block(&mut self, flow: &Flow, parent_font: f32) {
+    fn place_block(&mut self, flow: &Flow, parent_font: f32, root: bool) {
         let font = self.font(parent_font);
         self.dims.margin = self.edges(Family::Margin, font);
         self.dims.border = self.edges(Family::Border, font);
         self.dims.padding = self.edges(Family::Padding, font);
         self.resolve_width(flow.width, font);
+        let explicit = self.num("height", font);
+        if let Some(h) = explicit {
+            self.dims.content.height = h;
+        }
+        let can_top = !root && self.dims.border.top == 0.0 && self.dims.padding.top == 0.0;
+        if can_top {
+            if let Some(c) = self.children.first() {
+                let cmt = c.peek_margin_top(font);
+                self.dims.margin.top = self.dims.margin.top.max(cmt);
+            }
+        }
         self.dims.content.x =
             flow.x + self.dims.margin.left + self.dims.border.left + self.dims.padding.left;
         self.dims.content.y =
             flow.y + self.dims.margin.top + self.dims.border.top + self.dims.padding.top;
+        self.stack_children(font, explicit.is_none(), can_top, can_top);
+    }
+
+    fn stack_children(
+        &mut self,
+        font: f32,
+        set_height: bool,
+        can_bottom: bool,
+        top_collapsed: bool,
+    ) {
         if matches!(self.kind, BoxKind::Anonymous) {
             self.flow_lines(font);
-        } else {
-            let mut y = self.dims.content.y;
-            for child in &mut self.children {
-                let f = Flow {
-                    x: self.dims.content.x,
-                    y,
-                    width: self.dims.content.width,
-                };
-                child.place(&f, font);
-                let mb = child.dims.margin_box();
-                y = mb.y + mb.height;
-            }
-            self.dims.content.height = y - self.dims.content.y;
+            return;
         }
-        if let Some(h) = self.num("height", font) {
-            self.dims.content.height = h;
+        let mut prev: Option<(f32, f32)> = None;
+        for child in &mut self.children {
+            let cmt = child.peek_margin_top(font);
+            let (b, g) = match prev {
+                Some((bb, pmb)) => (bb, collapse(pmb, cmt)),
+                None => (
+                    self.dims.content.y,
+                    if top_collapsed { 0.0 } else { cmt },
+                ),
+            };
+            let f = Flow {
+                x: self.dims.content.x,
+                y: b + g - cmt,
+                width: self.dims.content.width,
+            };
+            child.place(&f, font);
+            let bb = child.dims.border_box();
+            prev = Some((bb.y + bb.height, child.dims.margin.bottom));
+        }
+        if set_height {
+            self.dims.content.height = match prev {
+                Some((bb, mb)) => {
+                    if can_bottom
+                        && self.dims.border.bottom == 0.0
+                        && self.dims.padding.bottom == 0.0
+                    {
+                        self.dims.margin.bottom = self.dims.margin.bottom.max(mb);
+                        bb - self.dims.content.y
+                    } else {
+                        bb + mb - self.dims.content.y
+                    }
+                }
+                None => 0.0,
+            };
         }
     }
 
@@ -492,6 +533,10 @@ impl<'a> LayoutBox<'a> {
             - self.dims.content.y;
     }
 
+    fn peek_margin_top(&self, parent_font: f32) -> f32 {
+        self.margin_sides(self.font(parent_font))[0].unwrap_or(0.0)
+    }
+
     fn resolve_width(&mut self, avail: f32, font: f32) {
         let w = self.num("width", font);
         let m = self.margin_sides(font);
@@ -543,6 +588,16 @@ fn px(v: &Value, font: f32) -> Option<f32> {
         Value::Length(n, Unit::Px) => Some(*n),
         Value::Length(n, Unit::Em) => Some(n * font),
         _ => None,
+    }
+}
+
+fn collapse(a: f32, b: f32) -> f32 {
+    if a >= 0.0 && b >= 0.0 {
+        a.max(b)
+    } else if a <= 0.0 && b <= 0.0 {
+        a.min(b)
+    } else {
+        a + b
     }
 }
 
@@ -694,6 +749,63 @@ mod tests {
         let root = layout(&styled, 100.0).unwrap();
         let div = find(&root, "div");
         assert!(eq(div.dims.content.height, 50.0));
+    }
+
+    #[test]
+    fn sibling_margins_collapse() {
+        let dom = parse_html("<html><div id=\"a\"></div><div id=\"b\"></div></html>");
+        let sheet = parse_css("#a { height: 5px; margin-bottom: 40px } #b { margin-top: 10px }");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 100.0).unwrap();
+        let b = &root.children[1];
+        assert!(eq(b.dims.content.y, 45.0));
+    }
+
+    #[test]
+    fn parent_child_collapse() {
+        let dom = parse_html("<html><div><p></p></div></html>");
+        let sheet = parse_css("div { margin-top: 20px } p { margin-top: 10px; height: 4px }");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 100.0).unwrap();
+        let div = find(&root, "div");
+        let p = find(div, "p");
+        assert!(eq(root.dims.content.y, 20.0));
+        assert!(eq(div.dims.content.y, 20.0));
+        assert!(eq(p.dims.content.y, 20.0));
+    }
+
+    #[test]
+    fn no_collapse_with_padding() {
+        let dom = parse_html("<html><div><p></p></div></html>");
+        let sheet = parse_css("div { padding-top: 10px } p { margin-top: 6px; height: 2px }");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 100.0).unwrap();
+        let div = find(&root, "div");
+        let p = find(div, "p");
+        assert!(eq(div.dims.content.y, 10.0));
+        assert!(eq(p.dims.content.y, 16.0));
+    }
+
+    #[test]
+    fn negative_margins_collapse() {
+        let dom = parse_html("<html><div id=\"a\"></div><div id=\"b\"></div></html>");
+        let sheet = parse_css("#a { height: 4px; margin-bottom: -5px } #b { margin-top: 10px }");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 100.0).unwrap();
+        let b = &root.children[1];
+        assert!(eq(b.dims.content.y, 9.0));
+    }
+
+    #[test]
+    fn bottom_collapse() {
+        let dom = parse_html("<html><div><p></p></div><div id=\"s\"></div></html>");
+        let sheet = parse_css(
+            "div { margin-bottom: 30px } p { height: 5px; margin-bottom: 12px } #s { height: 2px }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 100.0).unwrap();
+        let s = &root.children[1];
+        assert!(eq(s.dims.content.y, 35.0));
     }
 
     #[test]
