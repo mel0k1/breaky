@@ -1,0 +1,10 @@
+[package]
+name = "breaky-net"
+version = "0.1.0"
+edition = "2021"
+description = "HTTP client for Breaky"
+license = "MIT"
+
+[lib]
+name = "net"
+path = "src/lib.rs"
