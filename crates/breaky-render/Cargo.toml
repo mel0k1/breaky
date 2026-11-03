@@ -13,6 +13,7 @@ path = "src/lib.rs"
 breaky-css = { path = "../breaky-css" }
 breaky-layout = { path = "../breaky-layout" }
 breaky-font = { path = "../breaky-font" }
+breaky-img = { path = "../breaky-img" }
 
 [dev-dependencies]
 breaky-html = { path = "../breaky-html" }

@@ -78,6 +78,7 @@ pub struct LayoutBox<'a> {
     pub text: Option<&'a str>,
     pub marker: Option<&'a str>,
     pub marker_img: Option<&'a str>,
+    pub marker_size: (f32, f32),
     pub children: Vec<LayoutBox<'a>>,
     pub abs: Vec<LayoutBox<'a>>,
     ws: WS,
@@ -161,7 +162,15 @@ enum Side {
 }
 
 pub fn layout<'a>(styled: &'a StyledNode<'a>, viewport_width: f32) -> Option<LayoutBox<'a>> {
-    let mut root = build_root(styled)?;
+    layout_with(styled, viewport_width, &img::Store::new())
+}
+
+pub fn layout_with<'a>(
+    styled: &'a StyledNode<'a>,
+    viewport_width: f32,
+    imgs: &img::Store,
+) -> Option<LayoutBox<'a>> {
+    let mut root = build_root(styled, imgs)?;
     root.place(
         &Flow {
             x: 0.0,
@@ -213,9 +222,12 @@ fn num(x: f32) -> String {
     }
 }
 
-fn build_root<'a>(styled: &'a StyledNode<'a>) -> Option<LayoutBox<'a>> {
+fn build_root<'a>(
+    styled: &'a StyledNode<'a>,
+    imgs: &img::Store,
+) -> Option<LayoutBox<'a>> {
     let mut root_out: Vec<LayoutBox<'a>> = Vec::new();
-    let (mut flow, mut sink) = build_node(styled, &[], &mut root_out, false);
+    let (mut flow, mut sink) = build_node(styled, &[], &mut root_out, false, imgs);
     sink.extend(root_out);
     let mut root = match flow.len() {
         0 => return None,
@@ -228,6 +240,7 @@ fn build_root<'a>(styled: &'a StyledNode<'a>) -> Option<LayoutBox<'a>> {
             children: flow,
             marker: None,
             marker_img: None,
+            marker_size: (0.0, 0.0),
             ws: WS::Normal,
             align: Align::Left,
             strut: 0.0,
@@ -242,6 +255,7 @@ fn build_node<'a>(
     anc: &[&'a StyledNode<'a>],
     root_out: &mut Vec<LayoutBox<'a>>,
     inline_ctx: bool,
+    imgs: &img::Store,
 ) -> (Vec<LayoutBox<'a>>, Vec<LayoutBox<'a>>) {
     match &styled.node.kind {
         NodeKind::Text(src) => (text_boxes(styled, src), Vec::new()),
@@ -255,11 +269,11 @@ fn build_node<'a>(
             if !inline_ctx {
                 let d = display(styled);
                 if d == Display::TableRow {
-                    let (row, sink) = build_row(styled, anc, root_out);
+                    let (row, sink) = build_row(styled, anc, root_out, imgs);
                     return (vec![row], sink);
                 }
                 if matches!(d, Display::Table | Display::RowGroup) {
-                    return build_table(styled, anc, root_out);
+                    return build_table(styled, anc, root_out, imgs);
                 }
             }
             let pos = position_kw(styled);
@@ -286,6 +300,16 @@ fn build_node<'a>(
             };
             let is_item = matches!(kind, BoxKind::Block(_)) && display(styled) == Display::ListItem;
             let marker_img = if is_item { list_image(styled) } else { None };
+            let marker_size = match marker_img {
+                Some(u) => match imgs.get(u) {
+                    Some(im) => (im.width as f32, im.height as f32),
+                    None => {
+                        let f = own_font(styled);
+                        (f * 0.5, f * 0.5)
+                    }
+                },
+                None => (0.0, 0.0),
+            };
             let marker = if is_item && marker_img.is_none() {
                 list_marker(styled, anc)
             } else {
@@ -298,7 +322,7 @@ fn build_node<'a>(
             let mut my_abs: Vec<LayoutBox<'a>> = Vec::new();
             let mut sink: Vec<LayoutBox<'a>> = Vec::new();
             for c in &styled.children {
-                let (cf, cs) = build_node(c, &child_anc, root_out, kids_inline);
+                let (cf, cs) = build_node(c, &child_anc, root_out, kids_inline, imgs);
                 if pos != "static" {
                     my_abs.extend(cs);
                 } else {
@@ -313,6 +337,7 @@ fn build_node<'a>(
                     text: None,
                     marker,
                     marker_img,
+                    marker_size,
                     abs: my_abs,
                     children: group_blocks(flow, Some(styled)),
                     ws: ws_of(styled),
@@ -337,6 +362,7 @@ fn build_node<'a>(
                     text: None,
                     marker,
                     marker_img,
+                    marker_size,
                     abs: my_abs,
                     children,
                     ws: ws_of(styled),
@@ -350,7 +376,7 @@ fn build_node<'a>(
             let mut flow: Vec<LayoutBox<'a>> = Vec::new();
             let mut sink: Vec<LayoutBox<'a>> = Vec::new();
             for c in &styled.children {
-                let (cf, cs) = build_node(c, anc, root_out, false);
+                let (cf, cs) = build_node(c, anc, root_out, false, imgs);
                 sink.extend(cs);
                 flow.extend(cf);
             }
@@ -438,6 +464,7 @@ fn word_box<'a>(styled: &'a StyledNode<'a>, text: &'a str, ws: WS) -> LayoutBox<
         children: Vec::new(),
         marker: None,
         marker_img: None,
+            marker_size: (0.0, 0.0),
         ws,
         align: Align::Left,
         strut: 0.0,
@@ -603,6 +630,15 @@ fn caption_bottom(b: &LayoutBox) -> bool {
         .map_or(false, |v| matches!(v, Value::Keyword(k) if k == "bottom"))
 }
 
+fn own_font(styled: &StyledNode) -> f32 {
+    styled
+        .computed
+        .get("font-size")
+        .and_then(|v| v.first())
+        .and_then(|v| px(v, BASE_FONT))
+        .unwrap_or(BASE_FONT)
+}
+
 fn list_image<'a>(styled: &'a StyledNode<'a>) -> Option<&'a str> {
     match styled
         .computed
@@ -628,6 +664,7 @@ fn build_table<'a>(
     styled: &'a StyledNode<'a>,
     anc: &[&'a StyledNode<'a>],
     root_out: &mut Vec<LayoutBox<'a>>,
+    imgs: &img::Store,
 ) -> (Vec<LayoutBox<'a>>, Vec<LayoutBox<'a>>) {
     let mut rows: Vec<LayoutBox<'a>> = Vec::new();
     let mut cells: Vec<LayoutBox<'a>> = Vec::new();
@@ -648,7 +685,7 @@ fn build_table<'a>(
     for src in sources {
         let d = display(src);
         if d == Display::TableCaption {
-            let (mut cf, cs) = build_node(src, anc, root_out, false);
+            let (mut cf, cs) = build_node(src, anc, root_out, false, imgs);
             sink.extend(cs);
             if cf.iter().any(caption_bottom) {
                 bottom.append(&mut cf);
@@ -657,20 +694,20 @@ fn build_table<'a>(
             }
         } else if d == Display::TableRow {
             flush_cells(&mut rows, &mut cells);
-            let (row, cs) = build_row(src, anc, root_out);
+            let (row, cs) = build_row(src, anc, root_out, imgs);
             sink.extend(cs);
             rows.push(row);
         } else if d == Display::TableCell {
-            let (cell, cs) = build_node(src, anc, root_out, false);
+            let (cell, cs) = build_node(src, anc, root_out, false, imgs);
             sink.extend(cs);
             cells.extend(cell);
         } else if matches!(d, Display::Table | Display::RowGroup) {
             flush_cells(&mut rows, &mut cells);
-            let (t, cs) = build_table(src, anc, root_out);
+            let (t, cs) = build_table(src, anc, root_out, imgs);
             sink.extend(cs);
             rows.extend(t);
         } else {
-            let (cf, cs) = build_node(src, anc, root_out, false);
+            let (cf, cs) = build_node(src, anc, root_out, false, imgs);
             sink.extend(cs);
             cells.extend(cf);
         }
@@ -684,6 +721,7 @@ fn build_table<'a>(
         text: None,
         marker: None,
         marker_img: None,
+            marker_size: (0.0, 0.0),
         abs: Vec::new(),
         children: top,
         ws: ws_of(styled),
@@ -697,11 +735,12 @@ fn build_row<'a>(
     styled: &'a StyledNode<'a>,
     anc: &[&'a StyledNode<'a>],
     root_out: &mut Vec<LayoutBox<'a>>,
+    imgs: &img::Store,
 ) -> (LayoutBox<'a>, Vec<LayoutBox<'a>>) {
     let mut cells: Vec<LayoutBox<'a>> = Vec::new();
     let mut sink: Vec<LayoutBox<'a>> = Vec::new();
     for c in &styled.children {
-        let (cf, cs) = build_node(c, anc, root_out, false);
+        let (cf, cs) = build_node(c, anc, root_out, false, imgs);
         sink.extend(cs);
         if display(c) == Display::TableCell {
             cells.extend(cf);
@@ -712,6 +751,7 @@ fn build_row<'a>(
                 text: None,
                 marker: None,
                 marker_img: None,
+            marker_size: (0.0, 0.0),
                 abs: Vec::new(),
                 children: group_blocks(cf, None),
                 ws: WS::Normal,
@@ -726,6 +766,7 @@ fn build_row<'a>(
         text: None,
         marker: None,
         marker_img: None,
+            marker_size: (0.0, 0.0),
         abs: Vec::new(),
         children: cells,
         ws: ws_of(styled),
@@ -745,6 +786,7 @@ fn flush_cells<'a>(rows: &mut Vec<LayoutBox<'a>>, cells: &mut Vec<LayoutBox<'a>>
         text: None,
         marker: None,
         marker_img: None,
+            marker_size: (0.0, 0.0),
         abs: Vec::new(),
         children: std::mem::take(cells),
         ws: WS::Normal,
@@ -785,6 +827,7 @@ fn flush_run<'a>(
             children: std::mem::take(run),
             marker: None,
             marker_img: None,
+            marker_size: (0.0, 0.0),
             ws: styled.map(ws_of).unwrap_or(WS::Normal),
             align: styled.map(align_of).unwrap_or(Align::Left),
             strut: styled.map(strut_of).unwrap_or(0.0),
@@ -1628,7 +1671,7 @@ impl<'a> LayoutBox<'a> {
         if self.element().map(list_inside).unwrap_or(false) {
             let mw = match (self.marker, self.marker_img) {
                 (Some(m), _) => font::width(m, font),
-                (None, Some(_)) => font * 0.5 + 2.0,
+                (None, Some(_)) => self.marker_size.0 + 2.0,
                 _ => 0.0,
             };
             if mw > 0.0 {
@@ -4265,5 +4308,28 @@ mod tests {
         assert!(eq(f.children[1].dims.content.x, 40.0));
         assert!(eq(f.children[2].dims.content.x, 0.0));
         assert!(eq(f.children[2].dims.content.y, 20.0));
+    }
+
+    #[test]
+    fn list_marker_image_intrinsic() {
+        let dom = parse_html("<html><ul><li>a</li></ul></html>");
+        let sheet = parse_css("li { list-style-image: url(b.png); list-style-position: inside }");
+        let styled = style_build(&dom, &sheet);
+        let mut imgs = img::Store::new();
+        imgs.insert(
+            "b.png".into(),
+            img::Image {
+                width: 12,
+                height: 10,
+                data: vec![0; 480],
+            },
+        );
+        let root = layout_with(&styled, 200.0, &imgs).unwrap();
+        let li = find(find(&root, "ul"), "li");
+        assert!(eq(li.dims.content.x, 54.0));
+        assert!(eq(li.dims.content.width, 146.0));
+        let plain = layout(&styled, 200.0).unwrap();
+        let li2 = find(find(&plain, "ul"), "li");
+        assert!(eq(li2.dims.content.x, 50.0));
     }
 }

@@ -14,3 +14,4 @@ breaky-html = { path = "../breaky-html" }
 breaky-css = { path = "../breaky-css" }
 breaky-style = { path = "../breaky-style" }
 breaky-font = { path = "../breaky-font" }
+breaky-img = { path = "../breaky-img" }

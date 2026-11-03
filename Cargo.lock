@@ -39,6 +39,7 @@ dependencies = [
  "breaky-css",
  "breaky-font",
  "breaky-html",
+ "breaky-img",
  "breaky-style",
 ]
 
@@ -53,6 +54,7 @@ dependencies = [
  "breaky-css",
  "breaky-font",
  "breaky-html",
+ "breaky-img",
  "breaky-layout",
  "breaky-style",
 ]

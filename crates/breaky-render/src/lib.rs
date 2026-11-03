@@ -1,4 +1,5 @@
 use css::{Color, Unit, Value};
+use img::Image;
 use layout::{BoxKind, LayoutBox, Rect};
 
 pub struct Canvas {
@@ -76,6 +77,32 @@ impl Canvas {
         }
     }
 
+    pub fn image(&mut self, x: f32, y: f32, img: &Image, clip: Rect) {
+        for py in 0..img.height {
+            for px in 0..img.width {
+                let dx = x + px as f32;
+                let dy = y + py as f32;
+                if dx < clip.x
+                    || dx >= clip.x + clip.width
+                    || dy < clip.y
+                    || dy >= clip.y + clip.height
+                {
+                    continue;
+                }
+                let ix = dx as i64;
+                let iy = dy as i64;
+                if ix < 0 || iy < 0 || ix >= self.width as i64 || iy >= self.height as i64 {
+                    continue;
+                }
+                let [r, g, b, a] = img.pixel(px, py);
+                if a == 0 {
+                    continue;
+                }
+                self.blend(ix, iy, Color { r, g, b, a });
+            }
+        }
+    }
+
     pub fn to_png(&self) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
@@ -97,6 +124,10 @@ impl Canvas {
 }
 
 pub fn paint(root: &LayoutBox, viewport_width: f32) -> Canvas {
+    paint_with(root, viewport_width, &img::Store::new())
+}
+
+pub fn paint_with(root: &LayoutBox, viewport_width: f32, imgs: &img::Store) -> Canvas {
     let bb = root.dims.border_box();
     let height = ((bb.y + bb.height).max(max_bottom(root))
         .ceil()
@@ -113,7 +144,7 @@ pub fn paint(root: &LayoutBox, viewport_width: f32) -> Canvas {
             c,
         );
     }
-    paint_box(&mut canvas, root);
+    paint_box(&mut canvas, root, imgs);
     canvas
 }
 
@@ -129,22 +160,22 @@ fn max_bottom(b: &LayoutBox) -> f32 {
     m
 }
 
-fn paint_box(canvas: &mut Canvas, b: &LayoutBox) {
-    paint_bg(canvas, b);
+fn paint_box(canvas: &mut Canvas, b: &LayoutBox, imgs: &img::Store) {
+    paint_bg(canvas, b, imgs);
     paint_text(canvas, b);
-    paint_marker(canvas, b);
+    paint_marker(canvas, b, imgs);
     for child in &b.children {
         if !is_float(child) {
-            paint_box(canvas, child);
+            paint_box(canvas, child, imgs);
         }
     }
     for child in &b.children {
         if is_float(child) {
-            paint_box(canvas, child);
+            paint_box(canvas, child, imgs);
         }
     }
     for child in &b.abs {
-        paint_box(canvas, child);
+        paint_box(canvas, child, imgs);
     }
 }
 
@@ -169,7 +200,7 @@ fn paint_text(canvas: &mut Canvas, b: &LayoutBox) {
     canvas.text(b.dims.content.x, baseline, t, color, size);
 }
 
-fn paint_marker(canvas: &mut Canvas, b: &LayoutBox) {
+fn paint_marker(canvas: &mut Canvas, b: &LayoutBox, imgs: &img::Store) {
     if b.marker.is_none() && b.marker_img.is_none() {
         return;
     }
@@ -186,8 +217,22 @@ fn paint_marker(canvas: &mut Canvas, b: &LayoutBox) {
     let sc = font::scale(size);
     let baseline =
         b.dims.content.y + (lh - (font::ASCENT + font::DESCENT) * sc) / 2.0 + font::ASCENT * sc;
-    if b.marker_img.is_some() {
-        let side = size * 0.5;
+    if let Some(u) = b.marker_img {
+        if let Some(im) = imgs.get(u) {
+            canvas.image(
+                b.dims.content.x - 2.0 - im.width as f32,
+                baseline - im.height as f32,
+                im,
+                Rect {
+                    x: f32::NEG_INFINITY,
+                    y: f32::NEG_INFINITY,
+                    width: f32::INFINITY,
+                    height: f32::INFINITY,
+                },
+            );
+            return;
+        }
+        let side = b.marker_size.0.max(1.0);
         canvas.fill(
             Rect {
                 x: b.dims.content.x - 2.0 - side,
@@ -230,11 +275,32 @@ fn text_metrics(map: Option<&std::collections::HashMap<String, Vec<Value>>>) -> 
     (size, lh)
 }
 
-fn paint_bg(canvas: &mut Canvas, b: &LayoutBox) {
+fn paint_bg(canvas: &mut Canvas, b: &LayoutBox, imgs: &img::Store) {
     let d = &b.dims;
     let bb = d.border_box();
     if let Some(c) = computed(b).and_then(|m| token_color(m, "background-color")) {
         canvas.fill(bb, c);
+    }
+    if let Some(m) = computed(b) {
+        if let Some(u) = bg_url(m) {
+            if let Some(im) = imgs.get(&u) {
+                let pb = d.padding_box();
+                let (rw, rh) = (im.width as f32, im.height as f32);
+                let xs = match bg_repeat(m) {
+                    Repeat::Y | Repeat::None => vec![pb.x],
+                    _ => span(pb.x, pb.width, rw),
+                };
+                let ys = match bg_repeat(m) {
+                    Repeat::X | Repeat::None => vec![pb.y],
+                    _ => span(pb.y, pb.height, rh),
+                };
+                for y in ys {
+                    for x in &xs {
+                        canvas.image(*x, y, im, pb);
+                    }
+                }
+            }
+        }
     }
     if !borders_hidden(b) && d.border.top + d.border.right + d.border.bottom + d.border.left > 0.0
     {
@@ -283,6 +349,56 @@ fn paint_bg(canvas: &mut Canvas, b: &LayoutBox) {
             c,
         );
     }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Repeat {
+    Both,
+    X,
+    Y,
+    None,
+}
+
+fn span(start: f32, total: f32, tile: f32) -> Vec<f32> {
+    if tile <= 0.0 || total <= 0.0 {
+        return vec![start];
+    }
+    let n = (total / tile).ceil() as i64;
+    (0..n.max(1)).map(|i| start + i as f32 * tile).collect()
+}
+
+fn bg_url(m: &std::collections::HashMap<String, Vec<Value>>) -> Option<String> {
+    let pick = |vals: &[Value]| {
+        vals.iter().find_map(|v| match v {
+            Value::Url(u) => Some(u.clone()),
+            _ => None,
+        })
+    };
+    if let Some(u) = m.get("background-image").and_then(|v| pick(v)) {
+        return Some(u);
+    }
+    m.get("background").and_then(|v| pick(v))
+}
+
+fn bg_repeat(m: &std::collections::HashMap<String, Vec<Value>>) -> Repeat {
+    let of = |vals: &[Value]| -> Option<Repeat> {
+        vals.iter().find_map(|v| match v {
+            Value::Keyword(k) => match k.as_str() {
+                "no-repeat" => Some(Repeat::None),
+                "repeat-x" => Some(Repeat::X),
+                "repeat-y" => Some(Repeat::Y),
+                "repeat" => Some(Repeat::Both),
+                _ => None,
+            },
+            _ => None,
+        })
+    };
+    if let Some(r) = m.get("background-repeat").and_then(|v| of(v)) {
+        return r;
+    }
+    m.get("background")
+        .and_then(|v| of(v))
+        .unwrap_or(Repeat::Both)
 }
 
 fn is_float(b: &LayoutBox) -> bool {
@@ -385,7 +501,7 @@ mod tests {
     use super::*;
     use css::parse as parse_css;
     use html::parse as parse_html;
-    use layout::layout;
+    use layout::{layout, layout_with};
     use style::build as style_build;
 
     fn eq(a: f32, b: f32) -> bool {
@@ -596,6 +712,135 @@ mod tests {
         assert_eq!(canvas.pixel(32, 12), [255, 0, 0]);
         assert_eq!(canvas.pixel(32, 3), [255, 255, 255]);
         assert_eq!(canvas.pixel(32, 13), [255, 255, 255]);
+    }
+
+    #[test]
+    fn list_style_image_paints_bitmap() {
+        let dom = parse_html("<html><ul><li>a</li></ul></html>");
+        let sheet = parse_css("li { list-style-image: url(b.png); color: #ff0000 }");
+        let styled = style_build(&dom, &sheet);
+        let mut imgs = img::Store::new();
+        imgs.insert(
+            "b.png".into(),
+            img::Image {
+                width: 2,
+                height: 2,
+                data: vec![
+                    255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255,
+                ],
+            },
+        );
+        let tree = layout_with(&styled, 200.0, &imgs).unwrap();
+        let canvas = paint_with(&tree, 200.0, &imgs);
+        let li = find_box(&tree, "li").expect("missing li");
+        let lh = 19.2;
+        let sc = font::scale(16.0);
+        let baseline = li.dims.content.y
+            + (lh - (font::ASCENT + font::DESCENT) * sc) / 2.0
+            + font::ASCENT * sc;
+        let mx = li.dims.content.x - 4.0;
+        let by = baseline as u32;
+        assert_eq!(canvas.pixel(mx as u32, by - 2), [255, 0, 0]);
+        assert_eq!(canvas.pixel(mx as u32 + 1, by - 2), [0, 255, 0]);
+        assert_eq!(canvas.pixel(mx as u32, by - 1), [0, 0, 255]);
+        assert_eq!(canvas.pixel(mx as u32 + 1, by - 1), [255, 255, 0]);
+        assert_eq!(canvas.pixel(mx as u32 - 1, by - 1), [255, 255, 255]);
+        assert_eq!(canvas.pixel(mx as u32 + 2, by - 1), [255, 255, 255]);
+    }
+
+    #[test]
+    fn background_image_tiles() {
+        let dom = parse_html("<html><div></div></html>");
+        let sheet = parse_css("div { width: 10px; height: 10px; background-image: url(t.png) }");
+        let styled = style_build(&dom, &sheet);
+        let mut imgs = img::Store::new();
+        imgs.insert(
+            "t.png".into(),
+            img::Image {
+                width: 2,
+                height: 2,
+                data: vec![
+                    255, 0, 0, 255, 0, 0, 255, 255, 0, 255, 0, 255, 0, 0, 0, 255,
+                ],
+            },
+        );
+        let tree = layout(&styled, 100.0).unwrap();
+        let canvas = paint_with(&tree, 100.0, &imgs);
+        assert_eq!(canvas.pixel(0, 0), [255, 0, 0]);
+        assert_eq!(canvas.pixel(1, 0), [0, 0, 255]);
+        assert_eq!(canvas.pixel(0, 1), [0, 255, 0]);
+        assert_eq!(canvas.pixel(2, 2), [255, 0, 0]);
+        assert_eq!(canvas.pixel(9, 9), [0, 0, 0]);
+        assert_eq!(canvas.pixel(9, 10), [255, 255, 255]);
+    }
+
+    #[test]
+    fn background_image_no_repeat() {
+        let dom = parse_html("<html><div></div></html>");
+        let sheet = parse_css(
+            "div { width: 10px; height: 10px; background: url(t.png) no-repeat }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let mut imgs = img::Store::new();
+        imgs.insert(
+            "t.png".into(),
+            img::Image {
+                width: 2,
+                height: 2,
+                data: vec![255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255],
+            },
+        );
+        let tree = layout(&styled, 100.0).unwrap();
+        let canvas = paint_with(&tree, 100.0, &imgs);
+        assert_eq!(canvas.pixel(0, 0), [255, 0, 0]);
+        assert_eq!(canvas.pixel(1, 1), [255, 0, 0]);
+        assert_eq!(canvas.pixel(2, 2), [255, 255, 255]);
+    }
+
+    #[test]
+    fn background_image_repeat_x() {
+        let dom = parse_html("<html><div></div></html>");
+        let sheet = parse_css(
+            "div { width: 10px; height: 10px; background: url(t.png) repeat-x }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let mut imgs = img::Store::new();
+        imgs.insert(
+            "t.png".into(),
+            img::Image {
+                width: 2,
+                height: 2,
+                data: vec![255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255],
+            },
+        );
+        let tree = layout(&styled, 100.0).unwrap();
+        let canvas = paint_with(&tree, 100.0, &imgs);
+        assert_eq!(canvas.pixel(5, 0), [255, 0, 0]);
+        assert_eq!(canvas.pixel(5, 2), [255, 255, 255]);
+    }
+
+    fn find_box<'a>(b: &'a LayoutBox<'a>, name: &str) -> Option<&'a LayoutBox<'a>> {
+        for c in &b.children {
+            let t = match &c.kind {
+                BoxKind::Block(s)
+                | BoxKind::Inline(s)
+                | BoxKind::InlineBlock(s)
+                | BoxKind::Flex(s)
+                | BoxKind::Table(s)
+                | BoxKind::TableRow(s)
+                | BoxKind::TableCell(s) => s.node.name().unwrap_or("#text"),
+                BoxKind::Anonymous => "-",
+            };
+            if t == name {
+                return Some(c);
+            }
+        }
+        for c in &b.children {
+            if let Some(f) = find_box(c, name) {
+                return Some(f);
+            }
+        }
+        None
     }
 
     fn parse_png(png: &[u8]) -> (u32, u32, Vec<u8>) {
