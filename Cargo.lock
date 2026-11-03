@@ -5,3 +5,24 @@ version = 4
 [[package]]
 name = "breaky"
 version = "0.1.0"
+dependencies = [
+ "breaky-css",
+ "breaky-html",
+ "breaky-style",
+]
+
+[[package]]
+name = "breaky-css"
+version = "0.1.0"
+
+[[package]]
+name = "breaky-html"
+version = "0.1.0"
+
+[[package]]
+name = "breaky-style"
+version = "0.1.0"
+dependencies = [
+ "breaky-css",
+ "breaky-html",
+]

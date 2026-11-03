@@ -1,0 +1,10 @@
+[package]
+name = "breaky-html"
+version = "0.1.0"
+edition = "2021"
+description = "HTML tokenizer and DOM for Breaky"
+license = "MIT"
+
+[lib]
+name = "html"
+path = "src/lib.rs"

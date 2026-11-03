@@ -1,0 +1,10 @@
+[package]
+name = "breaky-css"
+version = "0.1.0"
+edition = "2021"
+description = "CSS parser for Breaky"
+license = "MIT"
+
+[lib]
+name = "css"
+path = "src/lib.rs"
