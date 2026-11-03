@@ -301,6 +301,15 @@ impl<'a> LayoutBox<'a> {
             };
             if let Some(v) = self.num(&long, font) {
                 base[i] = Some(v);
+            } else if matches!(family, Family::Border) {
+                let side_key = format!("border-{}", side);
+                if let Some(v) = self
+                    .element()
+                    .and_then(|s| s.computed.get(&side_key))
+                    .and_then(|vals| vals.iter().filter_map(|t| px(t, font)).next())
+                {
+                    base[i] = Some(v);
+                }
             }
             let v = base[i].unwrap_or(0.0);
             match i {
@@ -685,6 +694,18 @@ mod tests {
         let root = layout(&styled, 100.0).unwrap();
         let div = find(&root, "div");
         assert!(eq(div.dims.content.height, 50.0));
+    }
+
+    #[test]
+    fn border_side_shorthand() {
+        let dom = parse_html("<html><div><p></p></div></html>");
+        let sheet = parse_css("div { border-bottom: 4px solid black } p { height: 2px }");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 100.0).unwrap();
+        let div = find(&root, "div");
+        assert!(eq(div.dims.border.bottom, 4.0));
+        assert!(eq(div.dims.border.top, 0.0));
+        assert!(eq(div.dims.border.left, 0.0));
     }
 
     #[test]

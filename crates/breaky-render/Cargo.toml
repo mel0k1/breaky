@@ -1,0 +1,18 @@
+[package]
+name = "breaky-render"
+version = "0.1.0"
+edition = "2021"
+description = "PNG renderer for Breaky"
+license = "MIT"
+
+[lib]
+name = "render"
+path = "src/lib.rs"
+
+[dependencies]
+breaky-css = { path = "../breaky-css" }
+breaky-layout = { path = "../breaky-layout" }
+
+[dev-dependencies]
+breaky-html = { path = "../breaky-html" }
+breaky-style = { path = "../breaky-style" }

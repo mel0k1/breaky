@@ -24,6 +24,10 @@ fn main() {
         if let Some(tree) = layout::layout(&styled, viewport) {
             println!();
             layout::print_tree(&tree, 0);
+            if let Some(out) = args.get(4) {
+                let canvas = render::paint(&tree, viewport);
+                fs::write(out, canvas.to_png()).unwrap_or_else(fail);
+            }
         }
     }
 }
@@ -61,6 +65,6 @@ fn fail<T>(e: std::io::Error) -> T {
 }
 
 fn usage() -> ! {
-    eprintln!("usage: breaky <file> [style.css] [width]");
+    eprintln!("usage: breaky <file> [style.css] [width] [out.png]");
     exit(2);
 }

@@ -12,6 +12,7 @@ members = [
     "crates/breaky-css",
     "crates/breaky-style",
     "crates/breaky-layout",
+    "crates/breaky-render",
 ]
 
 [dependencies]
@@ -19,6 +20,7 @@ breaky-html = { path = "crates/breaky-html" }
 breaky-css = { path = "crates/breaky-css" }
 breaky-style = { path = "crates/breaky-style" }
 breaky-layout = { path = "crates/breaky-layout" }
+breaky-render = { path = "crates/breaky-render" }
 
 [profile.release]
 strip = true
