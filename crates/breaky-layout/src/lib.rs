@@ -73,6 +73,7 @@ pub struct LayoutBox<'a> {
     pub kind: BoxKind<'a>,
     pub text: Option<&'a str>,
     pub children: Vec<LayoutBox<'a>>,
+    pub abs: Vec<LayoutBox<'a>>,
 }
 
 struct Flow {
@@ -139,6 +140,9 @@ pub fn print_tree(tree: &LayoutBox, depth: usize) {
     for c in &tree.children {
         print_tree(c, depth + 1);
     }
+    for c in &tree.abs {
+        print_tree(c, depth + 1);
+    }
 }
 
 fn num(x: f32) -> String {
@@ -150,85 +154,133 @@ fn num(x: f32) -> String {
 }
 
 fn build_root<'a>(styled: &'a StyledNode<'a>) -> Option<LayoutBox<'a>> {
-    let mut kids = if matches!(styled.node.kind, NodeKind::Element { .. }) {
-        boxes_for(styled)
-    } else {
-        block_children(styled)
-    };
-    match kids.len() {
-        0 => None,
-        1 => kids.pop(),
-        _ => Some(LayoutBox {
+    let mut root_out: Vec<LayoutBox<'a>> = Vec::new();
+    let (mut flow, mut sink) = build_node(styled, &[], &mut root_out, false);
+    sink.extend(root_out);
+    let mut root = match flow.len() {
+        0 => return None,
+        1 => flow.pop().unwrap(),
+        _ => LayoutBox {
             dims: Dimensions::default(),
             kind: BoxKind::Anonymous,
             text: None,
-            children: kids,
-        }),
-    }
+            abs: Vec::new(),
+            children: flow,
+        },
+    };
+    root.abs.append(&mut sink);
+    Some(root)
 }
 
-fn boxes_for<'a>(styled: &'a StyledNode<'a>) -> Vec<LayoutBox<'a>> {
+fn build_node<'a>(
+    styled: &'a StyledNode<'a>,
+    anc: &[&'a StyledNode<'a>],
+    root_out: &mut Vec<LayoutBox<'a>>,
+    inline_ctx: bool,
+) -> (Vec<LayoutBox<'a>>, Vec<LayoutBox<'a>>) {
     match &styled.node.kind {
+        NodeKind::Text(src) => (text_boxes(styled, src), Vec::new()),
         NodeKind::Element { .. } => {
-            if float_side(styled).is_some() {
-                return vec![LayoutBox {
-                    dims: Dimensions::default(),
-                    kind: BoxKind::Block(styled),
-                    text: None,
-                    children: block_children(styled),
-                }];
+            if display(styled) == Display::None {
+                return (Vec::new(), Vec::new());
             }
-            match display(styled) {
-                Display::None => Vec::new(),
-                Display::Inline => vec![LayoutBox {
-                    dims: Dimensions::default(),
-                    kind: BoxKind::Inline(styled),
-                    text: None,
-                    children: inline_children(styled),
-                }],
-                Display::InlineBlock => vec![LayoutBox {
-                    dims: Dimensions::default(),
-                    kind: BoxKind::InlineBlock(styled),
-                    text: None,
-                    children: block_children(styled),
-                }],
-                Display::Block => vec![LayoutBox {
+            let pos = position_kw(styled);
+            let oof = pos == "absolute" || pos == "fixed";
+            let float = if oof || inline_ctx {
+                None
+            } else {
+                float_side(styled)
+            };
+            let kind = if oof || float.is_some() {
+                BoxKind::Block(styled)
+            } else if inline_ctx {
+                BoxKind::Inline(styled)
+            } else {
+                match display(styled) {
+                    Display::Block => BoxKind::Block(styled),
+                    Display::InlineBlock => BoxKind::InlineBlock(styled),
+                    _ => BoxKind::Inline(styled),
+                }
+            };
+            let kids_inline = matches!(kind, BoxKind::Inline(_));
+            let mut child_anc: Vec<&StyledNode<'a>> = anc.to_vec();
+            child_anc.push(styled);
+            let mut flow: Vec<LayoutBox<'a>> = Vec::new();
+            let mut my_abs: Vec<LayoutBox<'a>> = Vec::new();
+            let mut sink: Vec<LayoutBox<'a>> = Vec::new();
+            for c in &styled.children {
+                let (cf, cs) = build_node(c, &child_anc, root_out, kids_inline);
+                if pos != "static" {
+                    my_abs.extend(cs);
+                } else {
+                    sink.extend(cs);
+                }
+                flow.extend(cf);
+            }
+            if oof {
+                let b = LayoutBox {
                     dims: Dimensions::default(),
                     kind: BoxKind::Block(styled),
                     text: None,
-                    children: block_children(styled),
-                }],
+                    abs: my_abs,
+                    children: group_blocks(flow),
+                };
+                if pos == "fixed" || !positioned_in(anc) {
+                    root_out.push(b);
+                } else {
+                    sink.push(b);
+                }
+                (Vec::new(), sink)
+            } else {
+                let children = if kids_inline {
+                    flow
+                } else {
+                    group_blocks(flow)
+                };
+                let b = LayoutBox {
+                    dims: Dimensions::default(),
+                    kind,
+                    text: None,
+                    abs: my_abs,
+                    children,
+                };
+                (vec![b], sink)
             }
         }
-        NodeKind::Text(src) => text_boxes(styled, src),
-        _ => Vec::new(),
+        _ => {
+            let mut flow: Vec<LayoutBox<'a>> = Vec::new();
+            let mut sink: Vec<LayoutBox<'a>> = Vec::new();
+            for c in &styled.children {
+                let (cf, cs) = build_node(c, anc, root_out, false);
+                sink.extend(cs);
+                flow.extend(cf);
+            }
+            (group_blocks(flow), sink)
+        }
     }
 }
 
-fn inline_children<'a>(styled: &'a StyledNode<'a>) -> Vec<LayoutBox<'a>> {
-    styled.children.iter().flat_map(inline_boxes).collect()
+fn positioned_in(anc: &[&StyledNode]) -> bool {
+    anc.iter().rev().any(|s| positioned(s))
 }
 
-fn inline_boxes<'a>(styled: &'a StyledNode<'a>) -> Vec<LayoutBox<'a>> {
-    match &styled.node.kind {
-        NodeKind::Element { .. } => match display(styled) {
-            Display::None => Vec::new(),
-            Display::InlineBlock => vec![LayoutBox {
-                dims: Dimensions::default(),
-                kind: BoxKind::InlineBlock(styled),
-                text: None,
-                children: block_children(styled),
-            }],
-            _ => vec![LayoutBox {
-                dims: Dimensions::default(),
-                kind: BoxKind::Inline(styled),
-                text: None,
-                children: inline_children(styled),
-            }],
+fn position_kw(styled: &StyledNode) -> &'static str {
+    if !matches!(styled.node.kind, NodeKind::Element { .. }) {
+        return "static";
+    }
+    match styled.computed.get("position").and_then(|v| v.first()) {
+        Some(Value::Keyword(k)) => match k.as_str() {
+            "relative" => "relative",
+            "absolute" => "absolute",
+            "fixed" => "fixed",
+            _ => "static",
         },
-        NodeKind::Text(src) => text_boxes(styled, src),
-        _ => Vec::new(),
+        _ => "static",
     }
+}
+
+fn positioned(styled: &StyledNode) -> bool {
+    position_kw(styled) != "static"
 }
 
 fn text_boxes<'a>(styled: &'a StyledNode<'a>, src: &'a str) -> Vec<LayoutBox<'a>> {
@@ -261,6 +313,7 @@ fn word_box<'a>(styled: &'a StyledNode<'a>, text: &'a str) -> LayoutBox<'a> {
         dims: Dimensions::default(),
         kind: BoxKind::Inline(styled),
         text: Some(text),
+        abs: Vec::new(),
         children: Vec::new(),
     }
 }
@@ -276,17 +329,15 @@ fn float_side(styled: &StyledNode) -> Option<Side> {
     }
 }
 
-fn block_children<'a>(styled: &'a StyledNode<'a>) -> Vec<LayoutBox<'a>> {
+fn group_blocks<'a>(flow: Vec<LayoutBox<'a>>) -> Vec<LayoutBox<'a>> {
     let mut out: Vec<LayoutBox<'a>> = Vec::new();
     let mut run: Vec<LayoutBox<'a>> = Vec::new();
-    for c in &styled.children {
-        for b in boxes_for(c) {
-            if matches!(b.kind, BoxKind::Inline(_) | BoxKind::InlineBlock(_)) {
-                run.push(b);
-            } else {
-                flush_run(&mut out, &mut run);
-                out.push(b);
-            }
+    for b in flow {
+        if matches!(b.kind, BoxKind::Inline(_) | BoxKind::InlineBlock(_)) {
+            run.push(b);
+        } else {
+            flush_run(&mut out, &mut run);
+            out.push(b);
         }
     }
     flush_run(&mut out, &mut run);
@@ -299,6 +350,7 @@ fn flush_run<'a>(out: &mut Vec<LayoutBox<'a>>, run: &mut Vec<LayoutBox<'a>>) {
             dims: Dimensions::default(),
             kind: BoxKind::Anonymous,
             text: None,
+            abs: Vec::new(),
             children: std::mem::take(run),
         });
     } else {
@@ -565,6 +617,7 @@ impl<'a> LayoutBox<'a> {
             child.place(&f, floats, font);
             let bb = child.dims.border_box();
             prev = Some((bb.y + bb.height, child.dims.margin.bottom));
+            child.apply_relative(font, self.dims.content.width);
         }
         if set_height {
             self.dims.content.height = match prev {
@@ -581,6 +634,17 @@ impl<'a> LayoutBox<'a> {
                 }
                 None => 0.0,
             };
+        }
+        self.place_abs_children(font);
+    }
+
+    fn place_abs_children(&mut self, font: f32) {
+        if self.abs.is_empty() {
+            return;
+        }
+        let cb = self.dims.padding_box();
+        for a in &mut self.abs {
+            a.place_abs(cb, font);
         }
     }
 
@@ -615,6 +679,7 @@ impl<'a> LayoutBox<'a> {
                 line = line.max(mb.height);
                 line_start = false;
                 prev_space = false;
+                child.apply_relative(font, full_r - full_l);
                 continue;
             }
             let mw = child.measure_w(font, full_r - full_l);
@@ -657,6 +722,7 @@ impl<'a> LayoutBox<'a> {
             line = line.max(mh);
             line_start = false;
             prev_space = space;
+            child.apply_relative(font, full_r - full_l);
         }
         self.dims.content.height = cy + line - top;
     }
@@ -708,6 +774,7 @@ impl<'a> LayoutBox<'a> {
                 line = line.max(mb.height);
                 line_start = false;
                 prev_space = false;
+                child.apply_relative(font, flow.width);
                 continue;
             }
             let mw = child.measure_w(font, flow.width);
@@ -734,6 +801,7 @@ impl<'a> LayoutBox<'a> {
             line = line.max(mh);
             line_start = false;
             prev_space = space;
+            child.apply_relative(font, flow.width);
         }
         if w.is_none() && !self.children.is_empty() {
             self.dims.content.width = self
@@ -755,6 +823,7 @@ impl<'a> LayoutBox<'a> {
             })
             .fold(self.dims.content.y + self.dims.content.height, f32::max)
             - self.dims.content.y;
+        self.place_abs_children(font);
     }
 
     fn place_float(
@@ -922,6 +991,91 @@ impl<'a> LayoutBox<'a> {
             self.dims.content.height = h;
         }
         self.stack_children(floats, font, explicit.is_none(), false, false);
+    }
+
+    fn place_abs(&mut self, cb: Rect, parent_font: f32) {
+        let font = self.font(parent_font);
+        let base = cb.width;
+        self.dims.margin = self.edges(Family::Margin, font, base);
+        self.dims.border = self.edges(Family::Border, font, base);
+        self.dims.padding = self.edges(Family::Padding, font, base);
+        let ms = self.margin_sides(font, base);
+        let ml = ms[3].unwrap_or(0.0);
+        let mr = ms[1].unwrap_or(0.0);
+        let fixed = self.dims.border.left
+            + self.dims.border.right
+            + self.dims.padding.left
+            + self.dims.padding.right;
+        let used = ml + mr + fixed;
+        let room = (base - used).max(0.0);
+        let pref = (self.max_content_w(font, base) - used).max(0.0);
+        let w = self.num("width", font, base).unwrap_or(pref.min(room));
+        let left = self.num("left", font, base);
+        let right = self.num("right", font, base);
+        let mb_w = ml + fixed + w + mr;
+        let x_m = match (left, right) {
+            (Some(l), _) => cb.x + l,
+            (None, Some(r)) => cb.x + cb.width - r - mb_w,
+            (None, None) => cb.x + (cb.width - mb_w) / 2.0,
+        };
+        self.dims.content.width = w;
+        self.dims.content.x = x_m + ml + self.dims.border.left + self.dims.padding.left;
+        self.dims.content.y = cb.y;
+        let explicit = self.num("height", font, base);
+        if let Some(h) = explicit {
+            self.dims.content.height = h;
+        }
+        let mut floats: Vec<(Side, Rect)> = Vec::new();
+        self.stack_children(&mut floats, font, explicit.is_none(), false, false);
+        let top = self.num("top", font, base);
+        let bottom = self.num("bottom", font, base);
+        let h = self.dims.content.height;
+        let mb_h = self.dims.margin.top
+            + self.dims.border.top
+            + self.dims.padding.top
+            + h
+            + self.dims.padding.bottom
+            + self.dims.border.bottom
+            + self.dims.margin.bottom;
+        let y_m = match (top, bottom) {
+            (Some(t), _) => cb.y + t,
+            (None, Some(b)) => cb.y + cb.height - b - mb_h,
+            (None, None) => cb.y,
+        };
+        let dy = y_m + self.dims.margin.top + self.dims.border.top + self.dims.padding.top
+            - self.dims.content.y;
+        self.shift(0.0, dy);
+    }
+
+    fn apply_relative(&mut self, font: f32, base: f32) {
+        let skip = match self.style() {
+            Some(s) => position_kw(s) != "relative",
+            None => true,
+        };
+        if skip {
+            return;
+        }
+        let l = self.num("left", font, base);
+        let r = self.num("right", font, base);
+        let t = self.num("top", font, base);
+        let b = self.num("bottom", font, base);
+        let dx = l.or(r.map(|v| -v)).unwrap_or(0.0);
+        let dy = t.or(b.map(|v| -v)).unwrap_or(0.0);
+        self.shift(dx, dy);
+    }
+
+    fn shift(&mut self, dx: f32, dy: f32) {
+        if dx == 0.0 && dy == 0.0 {
+            return;
+        }
+        self.dims.content.x += dx;
+        self.dims.content.y += dy;
+        for c in &mut self.children {
+            c.shift(dx, dy);
+        }
+        for c in &mut self.abs {
+            c.shift(dx, dy);
+        }
     }
 
     fn measure_h(&self, parent_font: f32, base: f32) -> f32 {
@@ -1515,5 +1669,73 @@ mod tests {
         assert!(eq(a2.dims.border_box().x, 0.0));
         assert!(eq(a2.dims.border_box().y, 23.2));
         assert!(eq(a2.dims.content.width, font::width("bbbb", 16.0)));
+    }
+
+    #[test]
+    fn relative_offset() {
+        let dom = parse_html("<html><div style=\"position:relative; left:5px; top:3px\"><p>hi</p></div></html>");
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let div = find(&root, "div");
+        assert!(eq(div.dims.content.x, 5.0));
+        assert!(eq(div.dims.content.y, 3.0));
+        let p = find(div, "p");
+        assert!(eq(p.dims.content.y, 3.0));
+    }
+
+    #[test]
+    fn absolute_against_positioned_ancestor() {
+        let dom = parse_html("<html><div style=\"position:relative; height:40px\"><p style=\"position:absolute; top:10px; left:4px\">hi</p></div></html>");
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let div = find(&root, "div");
+        assert!(div.children.is_empty());
+        assert_eq!(div.abs.len(), 1);
+        let p = &div.abs[0];
+        assert!(eq(p.dims.content.x, 4.0));
+        assert!(eq(p.dims.content.y, 10.0));
+        assert!(eq(p.dims.content.width, font::width("hi", 16.0)));
+        assert!(eq(div.dims.content.height, 40.0));
+    }
+
+    #[test]
+    fn absolute_bottom_right() {
+        let dom = parse_html("<html><div style=\"position:relative; height:40px\"><p style=\"position:absolute; right:6px; bottom:5px; width:30px; height:10px\">hi</p></div></html>");
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let div = find(&root, "div");
+        let p = &div.abs[0];
+        assert!(eq(p.dims.content.x, 164.0));
+        assert!(eq(p.dims.content.y, 25.0));
+    }
+
+    #[test]
+    fn fixed_at_root() {
+        let dom = parse_html("<html><p style=\"position:fixed; top:2px; left:3px\">hi</p></html>");
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        assert_eq!(root.abs.len(), 1);
+        let p = &root.abs[0];
+        assert!(eq(p.dims.content.x, 3.0));
+        assert!(eq(p.dims.content.y, 2.0));
+    }
+
+    #[test]
+    fn absolute_no_positioned_ancestor() {
+        let dom = parse_html("<html><div><p style=\"position:absolute; top:2px; left:3px\">hi</p></div></html>");
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let div = find(&root, "div");
+        assert!(div.children.is_empty());
+        assert!(div.abs.is_empty());
+        assert_eq!(root.abs.len(), 1);
+        let p = &root.abs[0];
+        assert!(eq(p.dims.content.x, 3.0));
+        assert!(eq(p.dims.content.y, 2.0));
     }
 }

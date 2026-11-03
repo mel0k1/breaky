@@ -123,6 +123,9 @@ fn max_bottom(b: &LayoutBox) -> f32 {
     for c in &b.children {
         m = m.max(max_bottom(c));
     }
+    for c in &b.abs {
+        m = m.max(max_bottom(c));
+    }
     m
 }
 
@@ -138,6 +141,9 @@ fn paint_box(canvas: &mut Canvas, b: &LayoutBox) {
         if is_float(child) {
             paint_box(canvas, child);
         }
+    }
+    for child in &b.abs {
+        paint_box(canvas, child);
     }
 }
 
