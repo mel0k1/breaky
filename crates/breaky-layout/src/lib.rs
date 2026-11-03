@@ -1327,7 +1327,7 @@ impl<'a> LayoutBox<'a> {
         floats: &mut Vec<(Side, Rect)>,
         font: f32,
         has_h: bool,
-        _row_gap: f32,
+        row_gap: f32,
         col_gap: f32,
     ) {
         let inner_w = self.dims.content.width;
@@ -1356,67 +1356,142 @@ impl<'a> LayoutBox<'a> {
             shrinks.push(s);
             fixed.push((fx, fy));
         }
-        let main_fixed: Vec<f32> = fixed.iter().map(|f| f.0).collect();
-        flex_distribute(
-            &mut bases,
-            &grows,
-            &shrinks,
-            &main_fixed,
-            inner_w,
-            col_gap * (n.saturating_sub(1)) as f32,
-        );
-        let used: f32 = (0..n).map(|i| bases[i] + fixed[i].0).sum::<f32>()
-            + col_gap * (n.saturating_sub(1)) as f32;
-        let free = (inner_w - used).max(0.0);
-        let (start, extra) = justify_of(self.style(), n, free);
-        let mut cursor = self.dims.content.x + start;
-        let mut outer_h: Vec<f32> = Vec::new();
-        for i in 0..n {
-            let item = &mut self.children[i];
-            let f = item.font(font);
-            item.dims.margin = item.edges(Family::Margin, f, inner_w);
-            item.dims.border = item.edges(Family::Border, f, inner_w);
-            item.dims.padding = item.edges(Family::Padding, f, inner_w);
-            item.dims.content.width = bases[i];
-            item.dims.content.x = cursor
-                + item.dims.margin.left
-                + item.dims.border.left
-                + item.dims.padding.left;
-            item.dims.content.y = self.dims.content.y
-                + item.dims.margin.top
-                + item.dims.border.top
-                + item.dims.padding.top;
-            let ih = item.num_h("height", f, inner_w, h_opt).is_some();
-            if let Some(h) = item.num_h("height", f, inner_w, h_opt) {
-                item.dims.content.height = h;
-            }
-            item.stack_children(floats, f, !ih, false, false);
-            let mb = item.dims.margin_box();
-            outer_h.push(mb.height);
-            cursor += bases[i] + fixed[i].0 + col_gap + extra;
-        }
-        let inner_h = if has_h {
-            self.dims.content.height
-        } else {
-            outer_h.iter().fold(0.0f32, |a, &b| a.max(b))
+        let wrap = flex_wrap_of(self.style());
+        let lines = match wrap {
+            FlexWrap::NoWrap => vec![(0..n).collect::<Vec<usize>>()],
+            _ => split_lines(&bases, &fixed, inner_w, col_gap),
         };
-        let cont = self.style();
-        for i in 0..n {
-            let item = &mut self.children[i];
-            let f = item.font(font);
-            let ih_item = item.num_h("height", f, inner_w, h_opt).is_some();
-            match align_self(item.element(), cont) {
-                AlignSelf::Stretch if !ih_item => {
-                    item.dims.content.height = (inner_h - fixed[i].1).max(0.0);
-                }
-                AlignSelf::End => item.shift(0.0, inner_h - outer_h[i]),
-                AlignSelf::Center => item.shift(0.0, (inner_h - outer_h[i]) / 2.0),
-                _ => {}
+        let k = lines.len();
+        for line in &lines {
+            let mut bs: Vec<f32> = line.iter().map(|&i| bases[i]).collect();
+            let gs: Vec<f32> = line.iter().map(|&i| grows[i]).collect();
+            let ss: Vec<f32> = line.iter().map(|&i| shrinks[i]).collect();
+            let fs: Vec<f32> = line.iter().map(|&i| fixed[i].0).collect();
+            flex_distribute(
+                &mut bs,
+                &gs,
+                &ss,
+                &fs,
+                inner_w,
+                col_gap * (line.len().saturating_sub(1)) as f32,
+            );
+            for (j, &i) in line.iter().enumerate() {
+                bases[i] = bs[j];
             }
-            item.apply_relative(f, inner_w);
+        }
+        let mut outer_h: Vec<f32> = vec![0.0; n];
+        let mut top_y: Vec<f32> = vec![0.0; k];
+        let mut line_h: Vec<f32> = vec![0.0; k];
+        let mut cursor_y = self.dims.content.y;
+        for (c, line) in lines.iter().enumerate() {
+            top_y[c] = cursor_y;
+            let used: f32 = line.iter().map(|&i| bases[i] + fixed[i].0).sum::<f32>()
+                + col_gap * (line.len().saturating_sub(1)) as f32;
+            let free = (inner_w - used).max(0.0);
+            let (start, extra) = justify_of(self.style(), line.len(), free);
+            let mut cursor = self.dims.content.x + start;
+            for &i in line {
+                let item = &mut self.children[i];
+                let f = item.font(font);
+                item.dims.margin = item.edges(Family::Margin, f, inner_w);
+                item.dims.border = item.edges(Family::Border, f, inner_w);
+                item.dims.padding = item.edges(Family::Padding, f, inner_w);
+                item.dims.content.width = bases[i];
+                item.dims.content.x = cursor
+                    + item.dims.margin.left
+                    + item.dims.border.left
+                    + item.dims.padding.left;
+                item.dims.content.y = top_y[c]
+                    + item.dims.margin.top
+                    + item.dims.border.top
+                    + item.dims.padding.top;
+                let ih = item.num_h("height", f, inner_w, h_opt).is_some();
+                if let Some(h) = item.num_h("height", f, inner_w, h_opt) {
+                    item.dims.content.height = h;
+                }
+                item.stack_children(floats, f, !ih, false, false);
+                let mb = item.dims.margin_box();
+                outer_h[i] = mb.height;
+                line_h[c] = line_h[c].max(mb.height);
+                cursor += bases[i] + fixed[i].0 + col_gap + extra;
+            }
+            cursor_y = top_y[c] + line_h[c] + row_gap;
+        }
+        let ac = align_content_of(self.style());
+        let area: f32 = line_h.iter().sum::<f32>() + row_gap * (k.saturating_sub(1)) as f32;
+        let free_h = if has_h {
+            (self.dims.content.height - area).max(0.0)
+        } else {
+            0.0
+        };
+        if ac == AlignContent::Stretch && has_h {
+            for h in line_h.iter_mut() {
+                *h += free_h / k as f32;
+            }
+        }
+        let area: f32 = line_h.iter().sum::<f32>() + row_gap * (k.saturating_sub(1)) as f32;
+        let free_h = if has_h {
+            (self.dims.content.height - area).max(0.0)
+        } else {
+            0.0
+        };
+        let step = match ac {
+            AlignContent::Between if k > 1 => free_h / (k - 1) as f32,
+            AlignContent::Around => free_h / k as f32,
+            AlignContent::Evenly => free_h / (k + 1) as f32,
+            _ => 0.0,
+        };
+        let lead = match ac {
+            AlignContent::End => free_h,
+            AlignContent::Center => free_h / 2.0,
+            AlignContent::Around => step / 2.0,
+            AlignContent::Evenly => step,
+            _ => 0.0,
+        };
+        let mut prefix = vec![0.0; k];
+        for c in 1..k {
+            prefix[c] = prefix[c - 1] + line_h[c - 1] + row_gap;
+        }
+        let mut delta = vec![0.0; k];
+        for c in 0..k {
+            let ideal = self.dims.content.y + lead + step * c as f32 + prefix[c];
+            delta[c] = if wrap == FlexWrap::WrapReverse {
+                let band_top = self.dims.content.y + lead;
+                band_top + area - (ideal - band_top) - line_h[c]
+            } else {
+                ideal
+            } - top_y[c];
+        }
+        let cont = self.style();
+        for (c, line) in lines.iter().enumerate() {
+            for &i in line {
+                self.children[i].shift(0.0, delta[c]);
+            }
+            for &i in line {
+                let item = &mut self.children[i];
+                let f = item.font(font);
+                let ih_item = item.num_h("height", f, inner_w, h_opt).is_some();
+                let mut align = align_self(item.element(), cont);
+                if wrap == FlexWrap::WrapReverse {
+                    align = match align {
+                        AlignSelf::Start => AlignSelf::End,
+                        AlignSelf::End => AlignSelf::Start,
+                        other => other,
+                    };
+                }
+                match align {
+                    AlignSelf::Stretch if !ih_item => {
+                        item.dims.content.height = (line_h[c] - fixed[i].1).max(0.0);
+                    }
+                    AlignSelf::End => item.shift(0.0, line_h[c] - outer_h[i]),
+                    AlignSelf::Center => item.shift(0.0, (line_h[c] - outer_h[i]) / 2.0),
+                    _ => {}
+                }
+                item.apply_relative(f, inner_w);
+            }
         }
         if !has_h {
-            self.dims.content.height = inner_h;
+            self.dims.content.height = area;
         }
     }
 
@@ -2246,6 +2321,72 @@ enum AlignSelf {
     Start,
     End,
     Center,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum FlexWrap {
+    NoWrap,
+    Wrap,
+    WrapReverse,
+}
+
+fn flex_wrap_of(styled: Option<&StyledNode>) -> FlexWrap {
+    match styled
+        .and_then(|s| s.computed.get("flex-wrap"))
+        .and_then(|v| v.first())
+    {
+        Some(Value::Keyword(k)) if k == "wrap" => FlexWrap::Wrap,
+        Some(Value::Keyword(k)) if k == "wrap-reverse" => FlexWrap::WrapReverse,
+        _ => FlexWrap::NoWrap,
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum AlignContent {
+    Stretch,
+    Start,
+    End,
+    Center,
+    Between,
+    Around,
+    Evenly,
+}
+
+fn align_content_of(styled: Option<&StyledNode>) -> AlignContent {
+    match styled
+        .and_then(|s| s.computed.get("align-content"))
+        .and_then(|v| v.first())
+    {
+        Some(Value::Keyword(k)) => match k.as_str() {
+            "flex-start" | "start" => AlignContent::Start,
+            "flex-end" | "end" => AlignContent::End,
+            "center" => AlignContent::Center,
+            "space-between" => AlignContent::Between,
+            "space-around" => AlignContent::Around,
+            "space-evenly" => AlignContent::Evenly,
+            _ => AlignContent::Stretch,
+        },
+        _ => AlignContent::Stretch,
+    }
+}
+
+fn split_lines(bases: &[f32], fixed: &[(f32, f32)], inner: f32, gap: f32) -> Vec<Vec<usize>> {
+    let mut lines: Vec<Vec<usize>> = Vec::new();
+    let mut cur: Vec<usize> = Vec::new();
+    let mut used = 0.0;
+    for i in 0..bases.len() {
+        let w = bases[i] + fixed[i].0;
+        if !cur.is_empty() && used + gap + w > inner {
+            lines.push(std::mem::take(&mut cur));
+            used = 0.0;
+        }
+        used += if cur.is_empty() { w } else { gap + w };
+        cur.push(i);
+    }
+    if !cur.is_empty() {
+        lines.push(cur);
+    }
+    lines
 }
 
 fn justify_of(styled: Option<&StyledNode>, n: usize, free: f32) -> (f32, f32) {
@@ -4015,5 +4156,114 @@ mod tests {
         let f = find(&root, "div");
         assert!(eq(f.children[0].dims.content.width, 50.0));
         assert!(eq(f.children[1].dims.content.width, 50.0));
+    }
+
+    #[test]
+    fn flex_wrap_two_lines() {
+        let dom = parse_html(
+            "<html><div class=\"f\"><div class=\"a\"></div><div class=\"b\"></div></div></html>",
+        );
+        let sheet = parse_css(
+            ".f { display: flex; flex-wrap: wrap; width: 100px } .a { width: 60px; height: 20px } .b { width: 60px; height: 30px }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let f = find(&root, "div");
+        assert!(eq(f.children[0].dims.content.y, 0.0));
+        assert!(eq(f.children[1].dims.content.x, 0.0));
+        assert!(eq(f.children[1].dims.content.y, 20.0));
+        assert!(eq(f.dims.content.height, 50.0));
+    }
+
+    #[test]
+    fn flex_wrap_reverse_order() {
+        let dom = parse_html(
+            "<html><div class=\"f\"><div class=\"a\"></div><div class=\"b\"></div></div></html>",
+        );
+        let sheet = parse_css(
+            ".f { display: flex; flex-wrap: wrap-reverse; width: 100px } .a { width: 60px; height: 20px } .b { width: 60px; height: 30px }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let f = find(&root, "div");
+        assert!(eq(f.children[0].dims.content.y, 30.0));
+        assert!(eq(f.children[1].dims.content.y, 0.0));
+        assert!(eq(f.dims.content.height, 50.0));
+    }
+
+    #[test]
+    fn flex_wrap_gap_between_lines() {
+        let dom = parse_html(
+            "<html><div class=\"f\"><div class=\"a\"></div><div class=\"b\"></div></div></html>",
+        );
+        let sheet = parse_css(
+            ".f { display: flex; flex-wrap: wrap; width: 100px; gap: 10px } .a { width: 60px; height: 20px } .b { width: 60px; height: 30px }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let f = find(&root, "div");
+        assert!(eq(f.children[1].dims.content.y, 30.0));
+        assert!(eq(f.dims.content.height, 60.0));
+    }
+
+    #[test]
+    fn flex_align_content_stretch() {
+        let dom = parse_html(
+            "<html><div class=\"f\"><div class=\"a\"></div><div class=\"b\"></div></div></html>",
+        );
+        let sheet = parse_css(
+            ".f { display: flex; flex-wrap: wrap; width: 100px; height: 100px } .a { width: 60px } .b { width: 60px }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let f = find(&root, "div");
+        assert!(eq(f.children[0].dims.content.height, 50.0));
+        assert!(eq(f.children[1].dims.content.y, 50.0));
+    }
+
+    #[test]
+    fn flex_align_content_end() {
+        let dom = parse_html(
+            "<html><div class=\"f\"><div class=\"a\"></div><div class=\"b\"></div></div></html>",
+        );
+        let sheet = parse_css(
+            ".f { display: flex; flex-wrap: wrap; width: 100px; height: 100px; align-content: flex-end } .a { width: 60px; height: 20px } .b { width: 60px; height: 30px }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let f = find(&root, "div");
+        assert!(eq(f.children[0].dims.content.y, 50.0));
+        assert!(eq(f.children[1].dims.content.y, 70.0));
+    }
+
+    #[test]
+    fn flex_align_content_between() {
+        let dom = parse_html(
+            "<html><div class=\"f\"><div class=\"a\"></div><div class=\"b\"></div></div></html>",
+        );
+        let sheet = parse_css(
+            ".f { display: flex; flex-wrap: wrap; width: 100px; height: 100px; align-content: space-between } .a { width: 60px; height: 20px } .b { width: 60px; height: 30px }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let f = find(&root, "div");
+        assert!(eq(f.children[0].dims.content.y, 0.0));
+        assert!(eq(f.children[1].dims.content.y, 70.0));
+    }
+
+    #[test]
+    fn flex_wrap_three_items() {
+        let dom = parse_html(
+            "<html><div class=\"f\"><div class=\"a\"></div><div class=\"b\"></div><div class=\"c\"></div></div></html>",
+        );
+        let sheet = parse_css(
+            ".f { display: flex; flex-wrap: wrap; width: 100px } .a, .b, .c { width: 40px; height: 20px }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let f = find(&root, "div");
+        assert!(eq(f.children[1].dims.content.x, 40.0));
+        assert!(eq(f.children[2].dims.content.x, 0.0));
+        assert!(eq(f.children[2].dims.content.y, 20.0));
     }
 }
