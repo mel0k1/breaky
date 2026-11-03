@@ -249,6 +249,9 @@ fn build_node<'a>(
             if display(styled) == Display::None {
                 return (Vec::new(), Vec::new());
             }
+            if styled.node.name() == Some("br") {
+                return (vec![word_box(styled, "\n", WS::Normal)], Vec::new());
+            }
             if !inline_ctx {
                 let d = display(styled);
                 if d == Display::TableRow {
@@ -818,7 +821,7 @@ fn default_display(name: &str) -> Display {
         "head" | "title" | "meta" | "link" | "style" | "script" | "noscript" | "template"
         | "col" | "colgroup" => Display::None,
         "a" | "b" | "i" | "s" | "u" | "em" | "strong" | "span" | "code" | "small" | "sub"
-        | "sup" | "label" => Display::Inline,
+        | "sup" | "label" | "br" => Display::Inline,
         "li" => Display::ListItem,
         "table" => Display::Table,
         "tr" => Display::TableRow,
@@ -3859,5 +3862,45 @@ mod tests {
         let div = find(&root, "div");
         assert!(eq(div.children[0].dims.content.width, 80.0));
         assert!(eq(div.children[1].dims.content.x, 80.0));
+    }
+
+    #[test]
+    fn br_forces_line_break() {
+        let dom = parse_html("<html><p>a<br>b</p></html>");
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let p = find(&root, "p");
+        let run = &p.children[0];
+        assert_eq!(run.children.len(), 3);
+        assert!(eq(run.children[0].dims.content.y, 0.0));
+        assert!(eq(run.children[2].dims.content.y, 19.2));
+        assert!(eq(p.dims.content.height, 38.4));
+    }
+
+    #[test]
+    fn br_double_makes_blank_line() {
+        let dom = parse_html("<html><p>a<br><br>b</p></html>");
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let p = find(&root, "p");
+        let run = &p.children[0];
+        assert_eq!(run.children.len(), 4);
+        assert!(eq(run.children[3].dims.content.y, 38.4));
+        assert!(eq(p.dims.content.height, 57.6));
+    }
+
+    #[test]
+    fn br_display_none_ignored() {
+        let dom = parse_html("<html><p>a<br>b</p></html>");
+        let sheet = parse_css("br { display: none }");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let p = find(&root, "p");
+        let run = &p.children[0];
+        assert_eq!(run.children.len(), 2);
+        assert!(eq(run.children[1].dims.content.y, 0.0));
+        assert!(eq(p.dims.content.height, 19.2));
     }
 }
