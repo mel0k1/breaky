@@ -50,6 +50,11 @@ Workspace of small crates:
 - [x] Vertical alignment
 - [x] Lists
 - [x] Tables
+- [x] Table caption
+- [x] Border collapse
+- [x] List style image
+- [x] Flexbox
+- [x] Line breaks
 
 ## License
 
