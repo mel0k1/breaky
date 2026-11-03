@@ -1,5 +1,5 @@
 use css::{Unit, Value};
-use html::NodeKind;
+use html::{Node, NodeKind};
 use style::StyledNode;
 
 const BASE_FONT: f32 = 16.0;
@@ -72,6 +72,7 @@ pub struct LayoutBox<'a> {
     pub dims: Dimensions,
     pub kind: BoxKind<'a>,
     pub text: Option<&'a str>,
+    pub marker: Option<&'a str>,
     pub children: Vec<LayoutBox<'a>>,
     pub abs: Vec<LayoutBox<'a>>,
     ws: WS,
@@ -138,6 +139,7 @@ enum Display {
     Block,
     Inline,
     InlineBlock,
+    ListItem,
     None,
 }
 
@@ -209,6 +211,7 @@ fn build_root<'a>(styled: &'a StyledNode<'a>) -> Option<LayoutBox<'a>> {
             text: None,
             abs: Vec::new(),
             children: flow,
+            marker: None,
             ws: WS::Normal,
             align: Align::Left,
             strut: 0.0,
@@ -243,10 +246,16 @@ fn build_node<'a>(
                 BoxKind::Inline(styled)
             } else {
                 match display(styled) {
-                    Display::Block => BoxKind::Block(styled),
+                    Display::Block | Display::ListItem => BoxKind::Block(styled),
                     Display::InlineBlock => BoxKind::InlineBlock(styled),
                     _ => BoxKind::Inline(styled),
                 }
+            };
+            let marker = if matches!(kind, BoxKind::Block(_)) && display(styled) == Display::ListItem
+            {
+                list_marker(styled, anc)
+            } else {
+                None
             };
             let kids_inline = matches!(kind, BoxKind::Inline(_));
             let mut child_anc: Vec<&StyledNode<'a>> = anc.to_vec();
@@ -268,6 +277,7 @@ fn build_node<'a>(
                     dims: Dimensions::default(),
                     kind: BoxKind::Block(styled),
                     text: None,
+                    marker,
                     abs: my_abs,
                     children: group_blocks(flow, Some(styled)),
                     ws: ws_of(styled),
@@ -290,6 +300,7 @@ fn build_node<'a>(
                     dims: Dimensions::default(),
                     kind,
                     text: None,
+                    marker,
                     abs: my_abs,
                     children,
                     ws: ws_of(styled),
@@ -389,6 +400,7 @@ fn word_box<'a>(styled: &'a StyledNode<'a>, text: &'a str, ws: WS) -> LayoutBox<
         text: Some(text),
         abs: Vec::new(),
         children: Vec::new(),
+        marker: None,
         ws,
         align: Align::Left,
         strut: 0.0,
@@ -504,6 +516,59 @@ fn float_side(styled: &StyledNode) -> Option<Side> {
     }
 }
 
+fn node_attr<'a>(node: &'a Node, key: &str) -> Option<&'a str> {
+    match &node.kind {
+        NodeKind::Element { attrs, .. } => attrs
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str()),
+        _ => None,
+    }
+}
+
+fn list_marker<'a>(styled: &'a StyledNode<'a>, anc: &[&'a StyledNode<'a>]) -> Option<&'a str> {
+    let list = anc.last();
+    let kind = match styled.computed.get("list-style-type").and_then(|v| v.first()) {
+        Some(Value::Keyword(k)) => Some(k.as_str()),
+        _ => match list.and_then(|s| s.node.name()) {
+            Some("ol") => Some("decimal"),
+            Some(n) if n == "ul" || n == "menu" => Some("disc"),
+            _ => None,
+        },
+    };
+    match kind {
+        Some("none") => return None,
+        Some("disc") => return Some("\u{2022}"),
+        Some("circle") => return Some("\u{25e6}"),
+        Some("square") => return Some("\u{25aa}"),
+        _ => {}
+    }
+    let parent = list?;
+    let idx = parent
+        .children
+        .iter()
+        .position(|s| std::ptr::eq(s, styled))
+        .unwrap_or(0);
+    let idx = parent.children[..idx]
+        .iter()
+        .filter(|s| s.node.name() == Some("li"))
+        .count();
+    let start = node_attr(parent.node, "start")
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(1);
+    Some(Box::leak(format!("{}.", start + idx as i64).into_boxed_str()))
+}
+
+fn list_inside(styled: &StyledNode) -> bool {
+    matches!(
+        styled
+            .computed
+            .get("list-style-position")
+            .and_then(|v| v.first()),
+        Some(Value::Keyword(k)) if k == "inside"
+    )
+}
+
 fn group_blocks<'a>(
     flow: Vec<LayoutBox<'a>>,
     styled: Option<&StyledNode<'a>>,
@@ -534,6 +599,7 @@ fn flush_run<'a>(
             text: None,
             abs: Vec::new(),
             children: std::mem::take(run),
+            marker: None,
             ws: styled.map(ws_of).unwrap_or(WS::Normal),
             align: styled.map(align_of).unwrap_or(Align::Left),
             strut: styled.map(strut_of).unwrap_or(0.0),
@@ -545,15 +611,13 @@ fn flush_run<'a>(
 
 fn display(styled: &StyledNode) -> Display {
     if let Some(Value::Keyword(k)) = styled.computed.get("display").and_then(|v| v.first()) {
-        if k == "inline" {
-            return Display::Inline;
-        }
-        if k == "inline-block" {
-            return Display::InlineBlock;
-        }
-        if k == "none" {
-            return Display::None;
-        }
+        return match k.as_str() {
+            "inline" => Display::Inline,
+            "inline-block" => Display::InlineBlock,
+            "list-item" => Display::ListItem,
+            "none" => Display::None,
+            _ => Display::Block,
+        };
     }
     match styled.node.name() {
         Some(n) => default_display(n),
@@ -568,6 +632,7 @@ fn default_display(name: &str) -> Display {
         }
         "a" | "b" | "i" | "s" | "u" | "em" | "strong" | "span" | "code" | "small" | "sub"
         | "sup" | "label" => Display::Inline,
+        "li" => Display::ListItem,
         _ => Display::Block,
     }
 }
@@ -802,6 +867,13 @@ impl<'a> LayoutBox<'a> {
             flow.x + self.dims.margin.left + self.dims.border.left + self.dims.padding.left;
         self.dims.content.y =
             flow.y + self.dims.margin.top + self.dims.border.top + self.dims.padding.top;
+        if let Some(m) = self.marker {
+            if self.element().map(list_inside).unwrap_or(false) {
+                let mw = font::width(m, font);
+                self.dims.content.x += mw;
+                self.dims.content.width = (self.dims.content.width - mw).max(0.0);
+            }
+        }
         self.stack_children(floats, font, explicit.is_none(), can_top, can_top);
     }
 
@@ -2136,6 +2208,88 @@ mod tests {
         let x = &anon.children[0];
         let span = find(anon, "span");
         assert!(eq(x.dims.content.y - span.dims.content.y, 1.0));
+    }
+
+    #[test]
+    fn ul_bullet_marker() {
+        let dom = parse_html("<html><ul><li>aa</li></ul></html>");
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let ul = find(&root, "ul");
+        assert!(eq(ul.dims.padding.left, 40.0));
+        let li = find(ul, "li");
+        assert_eq!(li.marker, Some("\u{2022}"));
+        assert!(eq(li.dims.content.x, 40.0));
+    }
+
+    #[test]
+    fn ol_decimal_markers() {
+        let dom = parse_html("<html><ol><li>a</li><li>b</li></ol></html>");
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let ol = find(&root, "ol");
+        assert_eq!(ol.children[0].marker, Some("1."));
+        assert_eq!(ol.children[1].marker, Some("2."));
+        assert!(eq(ol.children[1].dims.content.y, 19.2));
+    }
+
+    #[test]
+    fn ol_start_attribute() {
+        let dom = parse_html("<html><ol start=\"5\"><li>a</li></ol></html>");
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let ol = find(&root, "ol");
+        assert_eq!(ol.children[0].marker, Some("5."));
+    }
+
+    #[test]
+    fn list_style_none() {
+        let dom = parse_html("<html><ul><li>a</li></ul></html>");
+        let sheet = parse_css("li { list-style-type: none }");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let li = find(find(&root, "ul"), "li");
+        assert_eq!(li.marker, None);
+    }
+
+    #[test]
+    fn list_style_type_variants() {
+        let dom = parse_html(
+            "<html><ul style=\"list-style-type: square\"><li>a</li></ul><ol style=\"list-style-type: circle\"><li>b</li></ol></html>",
+        );
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let ul = find(&root, "ul");
+        assert_eq!(find(ul, "li").marker, Some("\u{25aa}"));
+        let ol = find(&root, "ol");
+        assert_eq!(find(ol, "li").marker, Some("\u{25e6}"));
+    }
+
+    #[test]
+    fn list_inside_indents_content() {
+        let dom = parse_html("<html><ul><li style=\"list-style-position: inside\">a</li></ul></html>");
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let li = find(find(&root, "ul"), "li");
+        assert!(eq(
+            li.dims.content.x,
+            40.0 + font::width("\u{2022}", 16.0)
+        ));
+    }
+
+    #[test]
+    fn display_block_li_has_no_marker() {
+        let dom = parse_html("<html><ul><li style=\"display: block\">a</li></ul></html>");
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let li = find(find(&root, "ul"), "li");
+        assert_eq!(li.marker, None);
     }
 
     #[test]

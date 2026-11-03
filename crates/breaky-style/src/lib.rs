@@ -5,7 +5,7 @@ use html::{Node, NodeKind};
 
 const BASE_FONT: f32 = 16.0;
 
-const INHERITED: [&str; 9] = [
+const INHERITED: [&str; 11] = [
     "color",
     "font-family",
     "font-size",
@@ -13,6 +13,8 @@ const INHERITED: [&str; 9] = [
     "font-weight",
     "line-height",
     "letter-spacing",
+    "list-style-position",
+    "list-style-type",
     "text-align",
     "white-space",
 ];
@@ -84,6 +86,28 @@ fn build_rec<'a>(
                 computed.insert(
                     "white-space".to_string(),
                     vec![Value::Keyword("pre".to_string())],
+                );
+            }
+            if matches!(node.name(), Some("ul") | Some("ol") | Some("menu"))
+                && !computed.contains_key("padding-left")
+            {
+                computed.insert(
+                    "padding-left".to_string(),
+                    vec![Value::Length(40.0, Unit::Px)],
+                );
+            }
+            if matches!(node.name(), Some("ul") | Some("menu"))
+                && !computed.contains_key("list-style-type")
+            {
+                computed.insert(
+                    "list-style-type".to_string(),
+                    vec![Value::Keyword("disc".to_string())],
+                );
+            }
+            if node.name() == Some("ol") && !computed.contains_key("list-style-type") {
+                computed.insert(
+                    "list-style-type".to_string(),
+                    vec![Value::Keyword("decimal".to_string())],
                 );
             }
             for key in INHERITED {

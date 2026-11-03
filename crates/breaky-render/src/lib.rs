@@ -132,6 +132,7 @@ fn max_bottom(b: &LayoutBox) -> f32 {
 fn paint_box(canvas: &mut Canvas, b: &LayoutBox) {
     paint_bg(canvas, b);
     paint_text(canvas, b);
+    paint_marker(canvas, b);
     for child in &b.children {
         if !is_float(child) {
             paint_box(canvas, child);
@@ -166,6 +167,27 @@ fn paint_text(canvas: &mut Canvas, b: &LayoutBox) {
     let baseline =
         b.dims.content.y + (lh - (font::ASCENT + font::DESCENT) * sc) / 2.0 + font::ASCENT * sc;
     canvas.text(b.dims.content.x, baseline, t, color, size);
+}
+
+fn paint_marker(canvas: &mut Canvas, b: &LayoutBox) {
+    let m = match b.marker {
+        Some(m) => m,
+        None => return,
+    };
+    let map = computed(b);
+    let color = map
+        .and_then(|m| token_color(m, "color"))
+        .unwrap_or(Color {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 255,
+        });
+    let (size, lh) = text_metrics(map);
+    let sc = font::scale(size);
+    let baseline =
+        b.dims.content.y + (lh - (font::ASCENT + font::DESCENT) * sc) / 2.0 + font::ASCENT * sc;
+    canvas.text(b.dims.content.x - font::width(m, size), baseline, m, color, size);
 }
 
 fn text_metrics(map: Option<&std::collections::HashMap<String, Vec<Value>>>) -> (f32, f32) {
@@ -512,6 +534,17 @@ mod tests {
         let canvas = paint(&tree, 100.0);
         assert_eq!(canvas.pixel(0, 25), [0, 0, 0]);
         assert_eq!(canvas.pixel(5, 25), [255, 255, 255]);
+    }
+
+    #[test]
+    fn bullet_marker_paints() {
+        let dom = parse_html("<html><ul><li>a</li></ul></html>");
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let tree = layout(&styled, 200.0).unwrap();
+        let canvas = paint(&tree, 200.0);
+        assert_eq!(canvas.pixel(34, 5), [0, 0, 0]);
+        assert_eq!(canvas.pixel(20, 5), [255, 255, 255]);
     }
 
     fn parse_png(png: &[u8]) -> (u32, u32, Vec<u8>) {

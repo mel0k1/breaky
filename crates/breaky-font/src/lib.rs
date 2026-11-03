@@ -390,7 +390,31 @@ const TABLE: [Glyph; 95] = [
     },
 ];
 
+const DISC: Glyph = Glyph {
+    width: 3,
+    rows: [0b010, 0b111, 0b111, 0b010, 0, 0, 0],
+};
+
+const RING: Glyph = Glyph {
+    width: 3,
+    rows: [0b010, 0b101, 0b101, 0b010, 0, 0, 0],
+};
+
+const BLOCKY: Glyph = Glyph {
+    width: 3,
+    rows: [0b111, 0b111, 0b111, 0b111, 0, 0, 0],
+};
+
 pub fn glyph(c: char) -> &'static Glyph {
+    match c {
+        '\u{2022}' => &DISC,
+        '\u{25e6}' => &RING,
+        '\u{25aa}' => &BLOCKY,
+        _ => table_glyph(c),
+    }
+}
+
+fn table_glyph(c: char) -> &'static Glyph {
     let u = c as u32;
     if (32..127).contains(&u) {
         &TABLE[u as usize - 32]
