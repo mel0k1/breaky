@@ -74,6 +74,16 @@ pub struct LayoutBox<'a> {
     pub text: Option<&'a str>,
     pub children: Vec<LayoutBox<'a>>,
     pub abs: Vec<LayoutBox<'a>>,
+    ws: WS,
+    strut: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum WS {
+    Normal,
+    NoWrap,
+    Pre,
+    PreWrap,
 }
 
 struct Flow {
@@ -166,6 +176,8 @@ fn build_root<'a>(styled: &'a StyledNode<'a>) -> Option<LayoutBox<'a>> {
             text: None,
             abs: Vec::new(),
             children: flow,
+            ws: WS::Normal,
+            strut: 0.0,
         },
     };
     root.abs.append(&mut sink);
@@ -223,7 +235,9 @@ fn build_node<'a>(
                     kind: BoxKind::Block(styled),
                     text: None,
                     abs: my_abs,
-                    children: group_blocks(flow),
+                    children: group_blocks(flow, Some(styled)),
+                    ws: ws_of(styled),
+                    strut: 0.0,
                 };
                 if pos == "fixed" || !positioned_in(anc) {
                     root_out.push(b);
@@ -235,7 +249,7 @@ fn build_node<'a>(
                 let children = if kids_inline {
                     flow
                 } else {
-                    group_blocks(flow)
+                    group_blocks(flow, Some(styled))
                 };
                 let b = LayoutBox {
                     dims: Dimensions::default(),
@@ -243,6 +257,8 @@ fn build_node<'a>(
                     text: None,
                     abs: my_abs,
                     children,
+                    ws: ws_of(styled),
+                    strut: 0.0,
                 };
                 (vec![b], sink)
             }
@@ -255,7 +271,7 @@ fn build_node<'a>(
                 sink.extend(cs);
                 flow.extend(cf);
             }
-            (group_blocks(flow), sink)
+            (group_blocks(flow, None), sink)
         }
     }
 }
@@ -284,37 +300,114 @@ fn positioned(styled: &StyledNode) -> bool {
 }
 
 fn text_boxes<'a>(styled: &'a StyledNode<'a>, src: &'a str) -> Vec<LayoutBox<'a>> {
-    let mut out: Vec<LayoutBox<'a>> = Vec::new();
-    let words: Vec<&str> = src.split_whitespace().collect();
-    if words.is_empty() {
-        if !src.is_empty() {
-            out.push(word_box(styled, " "));
+    let ws = ws_of(styled);
+    if matches!(ws, WS::Pre | WS::PreWrap) {
+        let mut out: Vec<LayoutBox<'a>> = Vec::new();
+        let mut first = true;
+        for seg in src.split('\n') {
+            if !first {
+                out.push(word_box(styled, "\n", ws));
+            }
+            if matches!(ws, WS::Pre) {
+                if !seg.is_empty() {
+                    out.push(word_box(styled, seg, ws));
+                }
+            } else {
+                for part in runs(seg) {
+                    out.push(word_box(styled, part, ws));
+                }
+            }
+            first = false;
         }
         return out;
     }
-    if src.trim_start().len() < src.len() {
-        out.push(word_box(styled, " "));
+    let sep = |c: char| matches!(c, ' ' | '\t' | '\n' | '\r' | '\u{c}');
+    let mut out: Vec<LayoutBox<'a>> = Vec::new();
+    let words: Vec<&str> = src.split(sep).filter(|w| !w.is_empty()).collect();
+    if words.is_empty() {
+        if !src.is_empty() {
+            out.push(word_box(styled, " ", ws));
+        }
+        return out;
+    }
+    if src.starts_with(sep) {
+        out.push(word_box(styled, " ", ws));
     }
     let mut it = words.iter().peekable();
     while let Some(w) = it.next() {
-        out.push(word_box(styled, w));
+        out.push(word_box(styled, w, ws));
         if it.peek().is_some() {
-            out.push(word_box(styled, " "));
+            out.push(word_box(styled, " ", ws));
         }
     }
-    if src.trim_end().len() < src.len() {
-        out.push(word_box(styled, " "));
+    if src.ends_with(sep) {
+        out.push(word_box(styled, " ", ws));
     }
     out
 }
 
-fn word_box<'a>(styled: &'a StyledNode<'a>, text: &'a str) -> LayoutBox<'a> {
+fn word_box<'a>(styled: &'a StyledNode<'a>, text: &'a str, ws: WS) -> LayoutBox<'a> {
     LayoutBox {
         dims: Dimensions::default(),
         kind: BoxKind::Inline(styled),
         text: Some(text),
         abs: Vec::new(),
         children: Vec::new(),
+        ws,
+        strut: 0.0,
+    }
+}
+
+fn runs(seg: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    let mut in_space = false;
+    for (i, c) in seg.char_indices() {
+        let sp = c == ' ' || c == '\t';
+        if i > start && sp != in_space {
+            out.push(&seg[start..i]);
+            start = i;
+        }
+        in_space = sp;
+    }
+    if start < seg.len() {
+        out.push(&seg[start..]);
+    }
+    out
+}
+
+fn ws_of(styled: &StyledNode) -> WS {
+    match styled
+        .computed
+        .get("white-space")
+        .and_then(|v| v.first())
+    {
+        Some(Value::Keyword(k)) => match k.as_str() {
+            "nowrap" => WS::NoWrap,
+            "pre" => WS::Pre,
+            "pre-wrap" => WS::PreWrap,
+            _ => WS::Normal,
+        },
+        _ => WS::Normal,
+    }
+}
+
+fn strut_of(styled: &StyledNode) -> f32 {
+    let font = styled
+        .computed
+        .get("font-size")
+        .and_then(|v| v.first())
+        .and_then(|v| px(v, BASE_FONT))
+        .unwrap_or(BASE_FONT);
+    match styled.computed.get("line-height").and_then(|v| v.first()) {
+        Some(Value::Length(n, Unit::Px)) => *n,
+        Some(Value::Length(n, Unit::Em)) => n * font,
+        Some(Value::Keyword(k)) => k
+            .trim_end_matches('%')
+            .parse::<f32>()
+            .map(|m| m * font)
+            .unwrap_or(font * 1.2),
+        _ => font * 1.2,
     }
 }
 
@@ -329,22 +422,29 @@ fn float_side(styled: &StyledNode) -> Option<Side> {
     }
 }
 
-fn group_blocks<'a>(flow: Vec<LayoutBox<'a>>) -> Vec<LayoutBox<'a>> {
+fn group_blocks<'a>(
+    flow: Vec<LayoutBox<'a>>,
+    styled: Option<&StyledNode<'a>>,
+) -> Vec<LayoutBox<'a>> {
     let mut out: Vec<LayoutBox<'a>> = Vec::new();
     let mut run: Vec<LayoutBox<'a>> = Vec::new();
     for b in flow {
         if matches!(b.kind, BoxKind::Inline(_) | BoxKind::InlineBlock(_)) {
             run.push(b);
         } else {
-            flush_run(&mut out, &mut run);
+            flush_run(&mut out, &mut run, styled);
             out.push(b);
         }
     }
-    flush_run(&mut out, &mut run);
+    flush_run(&mut out, &mut run, styled);
     out
 }
 
-fn flush_run<'a>(out: &mut Vec<LayoutBox<'a>>, run: &mut Vec<LayoutBox<'a>>) {
+fn flush_run<'a>(
+    out: &mut Vec<LayoutBox<'a>>,
+    run: &mut Vec<LayoutBox<'a>>,
+    styled: Option<&StyledNode<'a>>,
+) {
     if run.iter().any(|b| b.text != Some(" ")) {
         out.push(LayoutBox {
             dims: Dimensions::default(),
@@ -352,6 +452,8 @@ fn flush_run<'a>(out: &mut Vec<LayoutBox<'a>>, run: &mut Vec<LayoutBox<'a>>) {
             text: None,
             abs: Vec::new(),
             children: std::mem::take(run),
+            ws: styled.map(ws_of).unwrap_or(WS::Normal),
+            strut: styled.map(strut_of).unwrap_or(0.0),
         });
     } else {
         run.clear();
@@ -535,6 +637,17 @@ impl<'a> LayoutBox<'a> {
         }
     }
 
+    fn is_space(&self) -> bool {
+        self.text == Some(" ") && matches!(self.ws, WS::Normal | WS::NoWrap)
+    }
+
+    fn wraps(&self) -> bool {
+        match self.text {
+            Some(_) => matches!(self.ws, WS::Normal | WS::PreWrap),
+            None => true,
+        }
+    }
+
     fn place(&mut self, flow: &Flow, floats: &mut Vec<(Side, Rect)>, parent_font: f32) {
         match self.kind {
             BoxKind::Inline(_) => self.place_inline(flow, floats, parent_font),
@@ -658,7 +771,15 @@ impl<'a> LayoutBox<'a> {
         let mut line_start = true;
         let mut prev_space = false;
         for child in &mut self.children {
-            let space = child.text == Some(" ");
+            if child.text == Some("\n") {
+                cy += if line == 0.0 { self.strut } else { line };
+                line = 0.0;
+                cx = band(floats, cy, 0.0, full_l, full_r).0;
+                line_start = true;
+                prev_space = false;
+                continue;
+            }
+            let space = child.is_space();
             if space && (line_start || prev_space) {
                 continue;
             }
@@ -694,7 +815,7 @@ impl<'a> LayoutBox<'a> {
                         .fold(cy, f32::max);
                     cx = band(floats, cy, mh, full_l, full_r).0;
                 }
-            } else if cx + mw > r {
+            } else if child.wraps() && cx + mw > r {
                 cy += line;
                 line = 0.0;
                 let b2 = band(floats, cy, mh, full_l, full_r);
@@ -753,7 +874,15 @@ impl<'a> LayoutBox<'a> {
         let mut prev_space = false;
         let limit = w.map(|v| self.dims.content.x + v);
         for child in &mut self.children {
-            let space = child.text == Some(" ");
+            if child.text == Some("\n") {
+                cx = self.dims.content.x;
+                cy += line;
+                line = 0.0;
+                line_start = true;
+                prev_space = false;
+                continue;
+            }
+            let space = child.is_space();
             if space && (line_start || prev_space) {
                 continue;
             }
@@ -780,7 +909,7 @@ impl<'a> LayoutBox<'a> {
             let mw = child.measure_w(font, flow.width);
             let mh = child.measure_h(font, flow.width);
             if let Some(lim) = limit {
-                if !line_start && cx + mw > lim {
+                if !line_start && child.wraps() && cx + mw > lim {
                     cx = self.dims.content.x;
                     cy += line;
                     line = 0.0;
@@ -1543,6 +1672,111 @@ mod tests {
         assert_eq!(anon.children[0].text, Some("a"));
         assert_eq!(anon.children[1].text, Some(" "));
         assert_eq!(anon.children[2].text, Some("b"));
+    }
+
+    #[test]
+    fn nbsp_does_not_collapse() {
+        let dom = parse_html("<html><p>a\u{a0} b</p></html>");
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 100.0).unwrap();
+        let p = find(&root, "p");
+        let anon = &p.children[0];
+        assert_eq!(anon.children[0].text, Some("a\u{a0}"));
+        assert!(eq(
+            anon.children[0].dims.content.width,
+            font::width("a\u{a0}", 16.0)
+        ));
+    }
+
+    #[test]
+    fn pre_preserves_spaces() {
+        let dom = parse_html("<html><pre>a  b</pre></html>");
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 100.0).unwrap();
+        let pre = find(&root, "pre");
+        let anon = &pre.children[0];
+        assert_eq!(anon.children.len(), 1);
+        assert_eq!(anon.children[0].text, Some("a  b"));
+        assert!(eq(
+            anon.children[0].dims.content.width,
+            font::width("a  b", 16.0)
+        ));
+    }
+
+    #[test]
+    fn pre_line_breaks() {
+        let dom = parse_html("<html><pre>ab\ncd</pre></html>");
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 100.0).unwrap();
+        let pre = find(&root, "pre");
+        let anon = &pre.children[0];
+        assert_eq!(anon.children.len(), 3);
+        let cd = &anon.children[2];
+        assert_eq!(cd.text, Some("cd"));
+        assert!(eq(cd.dims.content.y, 19.2));
+        assert!(eq(anon.dims.content.height, 38.4));
+    }
+
+    #[test]
+    fn pre_blank_line_uses_strut() {
+        let dom = parse_html("<html><pre>a\n\nb</pre></html>");
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 100.0).unwrap();
+        let pre = find(&root, "pre");
+        let anon = &pre.children[0];
+        let b = &anon.children[3];
+        assert_eq!(b.text, Some("b"));
+        assert!(eq(b.dims.content.y, 38.4));
+    }
+
+    #[test]
+    fn pre_tab_width() {
+        let dom = parse_html("<html><pre>a\tb</pre></html>");
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 100.0).unwrap();
+        let pre = find(&root, "pre");
+        let text = &pre.children[0].children[0];
+        assert!(eq(
+            text.dims.content.width,
+            font::width("a", 16.0) + 4.0 * font::width(" ", 16.0) + font::width("b", 16.0)
+        ));
+    }
+
+    #[test]
+    fn nowrap_keeps_one_line() {
+        let dom = parse_html("<html><p>aa bb</p></html>");
+        let sheet = parse_css("p { width: 30px; white-space: nowrap }");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let p = find(&root, "p");
+        let anon = &p.children[0];
+        let bb = &anon.children[2];
+        assert!(eq(bb.dims.content.x, font::width("aa", 16.0) + 6.0));
+        assert!(eq(bb.dims.content.y, 0.0));
+        assert!(eq(anon.dims.content.height, 19.2));
+    }
+
+    #[test]
+    fn pre_wrap_breaks_and_preserves() {
+        let dom = parse_html(
+            "<html><p style=\"white-space:pre-wrap\">aa  bb  cc</p></html>",
+        );
+        let sheet = parse_css("p { width: 50px }");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let p = find(&root, "p");
+        let anon = &p.children[0];
+        assert_eq!(anon.children.len(), 5);
+        assert_eq!(anon.children[1].text, Some("  "));
+        let cc = &anon.children[4];
+        assert_eq!(cc.text, Some("cc"));
+        assert!(eq(cc.dims.content.x, 0.0));
+        assert!(eq(cc.dims.content.y, 38.4));
     }
 
     #[test]

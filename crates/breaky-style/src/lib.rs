@@ -78,6 +78,14 @@ fn build_rec<'a>(
                     computed.insert(d.name, d.value);
                 }
             }
+            if matches!(node.name(), Some("pre") | Some("textarea"))
+                && !computed.contains_key("white-space")
+            {
+                computed.insert(
+                    "white-space".to_string(),
+                    vec![Value::Keyword("pre".to_string())],
+                );
+            }
             for key in INHERITED {
                 if !computed.contains_key(key) {
                     if let Some(v) = parent.and_then(|m| m.get(key)) {

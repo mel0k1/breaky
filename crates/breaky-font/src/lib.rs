@@ -394,6 +394,8 @@ pub fn glyph(c: char) -> &'static Glyph {
     let u = c as u32;
     if (32..127).contains(&u) {
         &TABLE[u as usize - 32]
+    } else if matches!(c, '\t' | '\n' | '\r' | '\u{a0}') {
+        &TABLE[' ' as usize - 32]
     } else {
         &TABLE['?' as usize - 32]
     }
@@ -404,12 +406,30 @@ pub fn scale(size: f32) -> f32 {
 }
 
 pub fn advance(c: char, size: f32) -> f32 {
-    let g = glyph(c);
-    (g.width as f32 + 1.0) * scale(size)
+    match c {
+        '\n' | '\r' => 0.0,
+        '\t' => 4.0 * advance(' ', size),
+        _ => {
+            let g = glyph(c);
+            (g.width as f32 + 1.0) * scale(size)
+        }
+    }
 }
 
 pub fn width(text: &str, size: f32) -> f32 {
     text.chars().map(|c| advance(c, size)).sum()
+}
+
+pub fn asc(size: f32) -> f32 {
+    ASCENT * scale(size)
+}
+
+pub fn desc(size: f32) -> f32 {
+    DESCENT * scale(size)
+}
+
+pub fn x_height(size: f32) -> f32 {
+    4.0 * scale(size)
 }
 
 #[cfg(test)]
@@ -432,7 +452,25 @@ mod tests {
     fn unknown_chars_fall_back() {
         let q = glyph('?');
         assert!(std::ptr::eq(glyph('\u{436}'), q));
-        assert!(std::ptr::eq(glyph('\t'), q));
+        assert!(std::ptr::eq(glyph('\u{1f600}'), q));
+    }
+
+    #[test]
+    fn control_whitespace_maps_to_space() {
+        assert!(std::ptr::eq(glyph('\t'), glyph(' ')));
+        assert!(std::ptr::eq(glyph('\n'), glyph(' ')));
+        assert!(std::ptr::eq(glyph('\u{a0}'), glyph(' ')));
+        assert!((advance('\t', 16.0) - 4.0 * advance(' ', 16.0)).abs() < 1e-4);
+        assert_eq!(advance('\n', 16.0), 0.0);
+        assert_eq!(advance('\r', 16.0), 0.0);
+        assert!((advance('\u{a0}', 16.0) - advance(' ', 16.0)).abs() < 1e-4);
+    }
+
+    #[test]
+    fn vertical_metrics() {
+        assert!((asc(16.0) - 10.0).abs() < 1e-4);
+        assert!((desc(16.0) - 4.0).abs() < 1e-4);
+        assert!((asc(32.0) - 20.0).abs() < 1e-4);
     }
 
     #[test]

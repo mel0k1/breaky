@@ -149,8 +149,8 @@ fn paint_box(canvas: &mut Canvas, b: &LayoutBox) {
 
 fn paint_text(canvas: &mut Canvas, b: &LayoutBox) {
     let t = match b.text {
-        Some(t) => t,
-        None => return,
+        Some(t) if t != "\n" => t,
+        _ => return,
     };
     let map = computed(b);
     let color = map
