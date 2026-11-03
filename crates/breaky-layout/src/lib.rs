@@ -94,6 +94,12 @@ enum Display {
     None,
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum Side {
+    Left,
+    Right,
+}
+
 pub fn layout<'a>(styled: &'a StyledNode<'a>, viewport_width: f32) -> Option<LayoutBox<'a>> {
     let mut root = build_root(styled)?;
     root.place(
@@ -103,6 +109,7 @@ pub fn layout<'a>(styled: &'a StyledNode<'a>, viewport_width: f32) -> Option<Lay
             width: viewport_width,
             height: 0.0,
         },
+        &mut Vec::new(),
         BASE_FONT,
     );
     Some(root)
@@ -156,19 +163,28 @@ fn build_root<'a>(styled: &'a StyledNode<'a>) -> Option<LayoutBox<'a>> {
 
 fn build_box<'a>(styled: &'a StyledNode<'a>) -> Option<LayoutBox<'a>> {
     match &styled.node.kind {
-        NodeKind::Element { .. } => match display(styled) {
-            Display::None => None,
-            Display::Inline => Some(LayoutBox {
-                dims: Dimensions::default(),
-                kind: BoxKind::Inline(styled),
-                children: styled.children.iter().filter_map(build_inline).collect(),
-            }),
-            Display::Block => Some(LayoutBox {
-                dims: Dimensions::default(),
-                kind: BoxKind::Block(styled),
-                children: block_children(styled),
-            }),
-        },
+        NodeKind::Element { .. } => {
+            if float_side(styled).is_some() {
+                return Some(LayoutBox {
+                    dims: Dimensions::default(),
+                    kind: BoxKind::Block(styled),
+                    children: block_children(styled),
+                });
+            }
+            match display(styled) {
+                Display::None => None,
+                Display::Inline => Some(LayoutBox {
+                    dims: Dimensions::default(),
+                    kind: BoxKind::Inline(styled),
+                    children: styled.children.iter().filter_map(build_inline).collect(),
+                }),
+                Display::Block => Some(LayoutBox {
+                    dims: Dimensions::default(),
+                    kind: BoxKind::Block(styled),
+                    children: block_children(styled),
+                }),
+            }
+        }
         NodeKind::Text(_) => Some(LayoutBox {
             dims: Dimensions::default(),
             kind: BoxKind::Inline(styled),
@@ -190,6 +206,17 @@ fn build_inline<'a>(styled: &'a StyledNode<'a>) -> Option<LayoutBox<'a>> {
             kind: BoxKind::Inline(styled),
             children: Vec::new(),
         }),
+        _ => None,
+    }
+}
+
+fn float_side(styled: &StyledNode) -> Option<Side> {
+    if !matches!(styled.node.kind, NodeKind::Element { .. }) {
+        return None;
+    }
+    match styled.computed.get("float").and_then(|v| v.first()) {
+        Some(Value::Keyword(k)) if k == "left" => Some(Side::Left),
+        Some(Value::Keyword(k)) if k == "right" => Some(Side::Right),
         _ => None,
     }
 }
@@ -381,14 +408,27 @@ impl<'a> LayoutBox<'a> {
         base4
     }
 
-    fn place(&mut self, flow: &Flow, parent_font: f32) {
-        match self.kind {
-            BoxKind::Inline(_) => self.place_inline(flow, parent_font),
-            _ => self.place_block(flow, parent_font, false),
+    fn float_side(&self) -> Option<Side> {
+        match &self.kind {
+            BoxKind::Block(s) => float_side(s),
+            _ => None,
         }
     }
 
-    fn place_block(&mut self, flow: &Flow, parent_font: f32, root: bool) {
+    fn place(&mut self, flow: &Flow, floats: &mut Vec<(Side, Rect)>, parent_font: f32) {
+        match self.kind {
+            BoxKind::Inline(_) => self.place_inline(flow, floats, parent_font),
+            _ => self.place_block(flow, floats, parent_font, false),
+        }
+    }
+
+    fn place_block(
+        &mut self,
+        flow: &Flow,
+        floats: &mut Vec<(Side, Rect)>,
+        parent_font: f32,
+        root: bool,
+    ) {
         let font = self.font(parent_font);
         self.dims.margin = self.edges(Family::Margin, font, flow.width);
         self.dims.border = self.edges(Family::Border, font, flow.width);
@@ -400,7 +440,7 @@ impl<'a> LayoutBox<'a> {
         }
         let can_top = !root && self.dims.border.top == 0.0 && self.dims.padding.top == 0.0;
         if can_top {
-            if let Some(c) = self.children.first() {
+            if let Some(c) = self.children.iter().find(|c| c.float_side().is_none()) {
                 let cmt = c.peek_margin_top(font, flow.width);
                 self.dims.margin.top = self.dims.margin.top.max(cmt);
             }
@@ -409,22 +449,37 @@ impl<'a> LayoutBox<'a> {
             flow.x + self.dims.margin.left + self.dims.border.left + self.dims.padding.left;
         self.dims.content.y =
             flow.y + self.dims.margin.top + self.dims.border.top + self.dims.padding.top;
-        self.stack_children(font, explicit.is_none(), can_top, can_top);
+        self.stack_children(floats, font, explicit.is_none(), can_top, can_top);
     }
 
     fn stack_children(
         &mut self,
+        floats: &mut Vec<(Side, Rect)>,
         font: f32,
         set_height: bool,
         can_bottom: bool,
         top_collapsed: bool,
     ) {
         if matches!(self.kind, BoxKind::Anonymous) {
-            self.flow_lines(font);
+            self.flow_lines(floats, font);
             return;
         }
         let mut prev: Option<(f32, f32)> = None;
         for child in &mut self.children {
+            if let Some(s) = child.float_side() {
+                let y = match prev {
+                    Some((bb, pmb)) => bb + pmb,
+                    None => self.dims.content.y,
+                };
+                let f = Flow {
+                    x: self.dims.content.x,
+                    y,
+                    width: self.dims.content.width,
+                    height: self.dims.content.height,
+                };
+                child.place_float(&f, floats, font, s);
+                continue;
+            }
             let cmt = child.peek_margin_top(font, self.dims.content.width);
             let (b, g) = match prev {
                 Some((bb, pmb)) => (bb, collapse(pmb, cmt)),
@@ -439,7 +494,7 @@ impl<'a> LayoutBox<'a> {
                 width: self.dims.content.width,
                 height: self.dims.content.height,
             };
-            child.place(&f, font);
+            child.place(&f, floats, font);
             let bb = child.dims.border_box();
             prev = Some((bb.y + bb.height, child.dims.margin.bottom));
         }
@@ -461,35 +516,60 @@ impl<'a> LayoutBox<'a> {
         }
     }
 
-    fn flow_lines(&mut self, font: f32) {
-        let left = self.dims.content.x;
+    fn flow_lines(&mut self, floats: &mut Vec<(Side, Rect)>, font: f32) {
+        let full_l = self.dims.content.x;
+        let full_r = full_l + self.dims.content.width;
         let top = self.dims.content.y;
-        let limit = left + self.dims.content.width;
-        let mut cx = left;
+        let mut cx = full_l;
         let mut cy = top;
         let mut line = 0.0f32;
+        let mut empty = true;
         for child in &mut self.children {
-            let mw = child.measure_w(font, self.dims.content.width);
-            let mh = child.measure_h(font, self.dims.content.width);
-            if cx > left && cx + mw > limit {
-                cx = left;
+            let mw = child.measure_w(font, full_r - full_l);
+            let mh = child.measure_h(font, full_r - full_l);
+            let (l, r) = band(floats, cy, mh.max(line), full_l, full_r);
+            if empty {
+                cx = l;
+                if mw > r - l {
+                    cy = floats
+                        .iter()
+                        .map(|(_, rc)| rc.y + rc.height)
+                        .fold(cy, f32::max);
+                    cx = band(floats, cy, mh, full_l, full_r).0;
+                }
+            } else if cx + mw > r {
                 cy += line;
                 line = 0.0;
+                let b2 = band(floats, cy, mh, full_l, full_r);
+                cx = b2.0;
+                if mw > b2.1 - b2.0 {
+                    cy = floats
+                        .iter()
+                        .map(|(_, rc)| rc.y + rc.height)
+                        .fold(cy, f32::max);
+                    cx = band(floats, cy, mh, full_l, full_r).0;
+                }
             }
             let f = Flow {
                 x: cx,
                 y: cy,
-                width: limit - cx,
+                width: 0.0,
                 height: 0.0,
             };
-            child.place(&f, font);
+            child.place(&f, floats, font);
             cx += mw;
             line = line.max(mh);
+            empty = false;
         }
         self.dims.content.height = cy + line - top;
     }
 
-    fn place_inline(&mut self, flow: &Flow, parent_font: f32) {
+    fn place_inline(
+        &mut self,
+        flow: &Flow,
+        floats: &mut Vec<(Side, Rect)>,
+        parent_font: f32,
+    ) {
         let font = self.font(parent_font);
         self.dims.margin = self.edges(Family::Margin, font, flow.width);
         self.dims.border = self.edges(Family::Border, font, flow.width);
@@ -521,7 +601,7 @@ impl<'a> LayoutBox<'a> {
                 width: mw,
                 height: 0.0,
             };
-            child.place(&f, font);
+            child.place(&f, floats, font);
             cx += mw;
             line = line.max(mh);
         }
@@ -545,6 +625,70 @@ impl<'a> LayoutBox<'a> {
             })
             .fold(self.dims.content.y + self.dims.content.height, f32::max)
             - self.dims.content.y;
+    }
+
+    fn place_float(
+        &mut self,
+        flow: &Flow,
+        floats: &mut Vec<(Side, Rect)>,
+        parent_font: f32,
+        side: Side,
+    ) {
+        let font = self.font(parent_font);
+        self.dims.margin = self.edges(Family::Margin, font, flow.width);
+        self.dims.border = self.edges(Family::Border, font, flow.width);
+        self.dims.padding = self.edges(Family::Padding, font, flow.width);
+        let w = self.num("width", font, flow.width);
+        self.dims.content.width = w.unwrap_or_else(|| {
+            let pref = self
+                .children
+                .iter()
+                .map(|c| c.measure_w(font, flow.width))
+                .fold(0.0f32, f32::max);
+            let room = flow.width
+                - self.dims.margin.left
+                - self.dims.margin.right
+                - self.dims.border.left
+                - self.dims.border.right
+                - self.dims.padding.left
+                - self.dims.padding.right;
+            pref.min(room.max(0.0))
+        });
+        let bb_w = self.dims.margin.left
+            + self.dims.border.left
+            + self.dims.padding.left
+            + self.dims.content.width
+            + self.dims.padding.right
+            + self.dims.border.right
+            + self.dims.margin.right;
+        let (bx, by) = match side {
+            Side::Left => (
+                floats
+                    .iter()
+                    .filter(|(s, _)| *s == Side::Left)
+                    .map(|(_, r)| r.x + r.width)
+                    .fold(flow.x, f32::max),
+                flow.y + self.dims.margin.top,
+            ),
+            Side::Right => (
+                floats
+                    .iter()
+                    .filter(|(s, _)| *s == Side::Right)
+                    .map(|(_, r)| r.x)
+                    .fold(flow.x + flow.width, f32::min)
+                    - bb_w,
+                flow.y + self.dims.margin.top,
+            ),
+        };
+        self.dims.content.x =
+            bx + self.dims.margin.left + self.dims.border.left + self.dims.padding.left;
+        self.dims.content.y = by + self.dims.border.top + self.dims.padding.top;
+        let explicit = self.num("height", font, flow.height);
+        if let Some(h) = explicit {
+            self.dims.content.height = h;
+        }
+        self.stack_children(floats, font, explicit.is_none(), false, false);
+        floats.push((side, self.dims.border_box()));
     }
 
     fn peek_margin_top(&self, parent_font: f32, base: f32) -> f32 {
@@ -620,6 +764,20 @@ fn pct_val(v: &Value, base: f32) -> Option<f32> {
 
 fn len_or(v: &Value, font: f32, base: f32) -> Option<f32> {
     px(v, font).or_else(|| pct_val(v, base))
+}
+
+fn band(floats: &[(Side, Rect)], y: f32, h: f32, l0: f32, r0: f32) -> (f32, f32) {
+    let mut l = l0;
+    let mut r = r0;
+    for (side, rc) in floats {
+        if rc.y < y + h && rc.y + rc.height > y {
+            match side {
+                Side::Left => l = l.max(rc.x + rc.width),
+                Side::Right => r = r.min(rc.x),
+            }
+        }
+    }
+    (l, r)
 }
 
 fn collapse(a: f32, b: f32) -> f32 {
@@ -825,6 +983,83 @@ mod tests {
         let div = find(&root, "div");
         let p = find(div, "p");
         assert!(eq(p.dims.content.height, 50.0));
+    }
+
+    #[test]
+    fn float_left_line_avoid() {
+        let dom = parse_html("<html><div class=\"f\"></div><p>hi</p></html>");
+        let sheet = parse_css(".f { float: left; width: 50px; height: 30px } p { height: 20px }");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let f = &root.children[0];
+        let fb = f.dims.border_box();
+        assert!(eq(fb.x, 0.0));
+        assert!(eq(fb.y, 0.0));
+        assert!(eq(fb.width, 50.0));
+        assert!(eq(fb.height, 30.0));
+        let p = &root.children[1];
+        assert!(eq(p.dims.content.x, 0.0));
+        assert!(eq(p.dims.content.width, 200.0));
+        let text = &p.children[0].children[0];
+        assert!(eq(text.dims.content.x, 50.0));
+    }
+
+    #[test]
+    fn float_right() {
+        let dom = parse_html("<html><div class=\"f\"></div></html>");
+        let sheet = parse_css(".f { float: right; width: 50px; height: 10px }");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let f = &root.children[0];
+        assert!(eq(f.dims.border_box().x, 150.0));
+        assert!(eq(f.dims.content.x, 150.0));
+    }
+
+    #[test]
+    fn floats_stack() {
+        let dom = parse_html("<html><div class=\"f\"></div><div class=\"f\"></div></html>");
+        let sheet = parse_css(".f { float: left; width: 50px; height: 10px }");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        assert!(eq(root.children[0].dims.border_box().x, 0.0));
+        assert!(eq(root.children[1].dims.border_box().x, 50.0));
+    }
+
+    #[test]
+    fn wrap_below_float() {
+        let dom = parse_html("<html><div class=\"f\"></div><p><span class=\"s\"></span></p></html>");
+        let sheet = parse_css(".f { float: left; width: 150px; height: 30px } .s { width: 60px }");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let p = &root.children[1];
+        let span = &p.children[0].children[0];
+        assert!(eq(span.dims.content.x, 0.0));
+        assert!(eq(span.dims.content.y, 30.0));
+    }
+
+    #[test]
+    fn float_not_parent_height() {
+        let dom = parse_html("<html><div class=\"f\"></div></html>");
+        let sheet = parse_css(".f { float: left; width: 50px; height: 40px }");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        assert!(eq(root.dims.content.height, 0.0));
+    }
+
+    #[test]
+    fn float_avoids_other_float() {
+        let dom = parse_html(
+            "<html><div class=\"f\"></div><p><span class=\"s\"></span></p></html>",
+        );
+        let sheet = parse_css(
+            ".f { float: left; width: 150px; height: 30px } .s { width: 40px }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let p = &root.children[1];
+        let span = &p.children[0].children[0];
+        assert!(eq(span.dims.content.x, 150.0));
+        assert!(eq(span.dims.content.y, 0.0));
     }
 
     #[test]
