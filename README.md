@@ -25,6 +25,7 @@ Workspace of small crates:
 - `breaky-style` — selector matching and cascade
 - `breaky-layout` — box tree and block/inline layout
 - `breaky-render` — PNG painter (hand-written encoder, zero deps)
+- `breaky-font` — embedded bitmap font and glyph metrics
 - `breaky-net` — HTTP client and URL resolution
 - `breaky` — CLI
 
