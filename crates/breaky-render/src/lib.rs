@@ -258,21 +258,37 @@ fn paint_img(canvas: &mut Canvas, b: &LayoutBox, imgs: &img::Store) {
     if c.width <= 0.0 || c.height <= 0.0 {
         return;
     }
-    let nearest = computed(b).map(pixelated).unwrap_or(false);
-    canvas.image_scaled(
-        c.x,
-        c.y,
-        c.width,
-        c.height,
-        im,
-        Rect {
-            x: f32::NEG_INFINITY,
-            y: f32::NEG_INFINITY,
-            width: f32::INFINITY,
-            height: f32::INFINITY,
-        },
-        !nearest,
-    );
+    let m = computed(b);
+    let nearest = m.map(pixelated).unwrap_or(false);
+    let (iw, ih) = (im.width as f32, im.height as f32);
+    let fit = m.map(object_fit).unwrap_or(Fit::Fill);
+    let placed = |w: f32, h: f32| (c.x + (c.width - w) / 2.0, c.y + (c.height - h) / 2.0);
+    let (dx, dy, dw, dh) = match fit {
+        Fit::Fill => (c.x, c.y, c.width, c.height),
+        Fit::Contain => {
+            let s = (c.width / iw).min(c.height / ih);
+            let (dw, dh) = (iw * s, ih * s);
+            let (dx, dy) = placed(dw, dh);
+            (dx, dy, dw, dh)
+        }
+        Fit::Cover => {
+            let s = (c.width / iw).max(c.height / ih);
+            let (dw, dh) = (iw * s, ih * s);
+            let (dx, dy) = placed(dw, dh);
+            (dx, dy, dw, dh)
+        }
+        Fit::None => {
+            let (dx, dy) = placed(iw, ih);
+            (dx, dy, iw, ih)
+        }
+        Fit::ScaleDown => {
+            let s = ((c.width / iw).min(c.height / ih)).min(1.0);
+            let (dw, dh) = (iw * s, ih * s);
+            let (dx, dy) = placed(dw, dh);
+            (dx, dy, dw, dh)
+        }
+    };
+    canvas.image_scaled(dx, dy, dw, dh, im, c, !nearest);
 }
 
 fn paint_box(canvas: &mut Canvas, b: &LayoutBox, imgs: &img::Store) {
@@ -692,6 +708,27 @@ fn pixelated(m: &std::collections::HashMap<String, Vec<Value>>) -> bool {
         m.get("image-rendering").and_then(|v| v.first()),
         Some(Value::Keyword(k)) if k == "pixelated"
     )
+}
+
+enum Fit {
+    Fill,
+    Contain,
+    Cover,
+    None,
+    ScaleDown,
+}
+
+fn object_fit(m: &std::collections::HashMap<String, Vec<Value>>) -> Fit {
+    match m.get("object-fit").and_then(|v| v.first()) {
+        Some(Value::Keyword(k)) => match k.as_str() {
+            "contain" => Fit::Contain,
+            "cover" => Fit::Cover,
+            "none" => Fit::None,
+            "scale-down" => Fit::ScaleDown,
+            _ => Fit::Fill,
+        },
+        _ => Fit::Fill,
+    }
 }
 
 fn is_float(b: &LayoutBox) -> bool {
@@ -1359,6 +1396,71 @@ mod tests {
         let p = canvas.pixel(1, 0);
         assert_eq!(p[0], 255);
         assert!(p[1] > 0 && p[1] < 128, "green must come only from coverage");
+    }
+
+    fn quad_store() -> img::Store {
+        let mut imgs = img::Store::new();
+        imgs.insert(
+            "q.png".into(),
+            img::Image {
+                width: 2,
+                height: 2,
+                data: vec![
+                    255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255,
+                ],
+            },
+        );
+        imgs
+    }
+
+    fn paint_img_fit(css: &str, w: u32, h: u32) -> Canvas {
+        let dom = parse_html(format!(
+            "<html><body><img src=\"q.png\" width=\"{}\" height=\"{}\"></body></html>",
+            w, h
+        )
+        .as_str());
+        let sheet = parse_css(css);
+        let styled = style_build(&dom, &sheet);
+        let imgs = quad_store();
+        let tree = layout_with(&styled, 50.0, &imgs).unwrap();
+        paint_with(&tree, 50.0, &imgs)
+    }
+
+    #[test]
+    fn object_fit_contain_letterboxes() {
+        let canvas = paint_img_fit("img { object-fit: contain }", 4, 2);
+        assert_eq!(canvas.pixel(0, 0), [255, 255, 255]);
+        assert_eq!(canvas.pixel(1, 0), [255, 0, 0]);
+        assert_eq!(canvas.pixel(2, 0), [0, 255, 0]);
+        assert_eq!(canvas.pixel(3, 0), [255, 255, 255]);
+        assert_eq!(canvas.pixel(1, 1), [0, 0, 255]);
+        assert_eq!(canvas.pixel(2, 1), [255, 255, 0]);
+    }
+
+    #[test]
+    fn object_fit_cover_clips() {
+        let canvas = paint_img_fit("img { object-fit: cover }", 4, 2);
+        assert_eq!(canvas.pixel(0, 0), [191, 0, 64]);
+        assert_eq!(canvas.pixel(3, 1), [191, 255, 0]);
+    }
+
+    #[test]
+    fn object_fit_none_keeps_natural() {
+        let canvas = paint_img_fit("img { object-fit: none }", 4, 4);
+        assert_eq!(canvas.pixel(0, 0), [255, 255, 255]);
+        assert_eq!(canvas.pixel(1, 1), [255, 0, 0]);
+        assert_eq!(canvas.pixel(2, 2), [255, 255, 0]);
+        assert_eq!(canvas.pixel(3, 3), [255, 255, 255]);
+    }
+
+    #[test]
+    fn object_fit_scale_down_never_grows() {
+        let canvas = paint_img_fit("img { object-fit: scale-down }", 4, 4);
+        assert_eq!(canvas.pixel(0, 0), [255, 255, 255]);
+        assert_eq!(canvas.pixel(1, 1), [255, 0, 0]);
+        assert_eq!(canvas.pixel(3, 3), [255, 255, 255]);
+        let small = paint_img_fit("img { object-fit: scale-down }", 1, 1);
+        assert_eq!(small.pixel(0, 0), [128, 128, 64]);
     }
 
     #[test]
