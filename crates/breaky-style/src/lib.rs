@@ -3,6 +3,18 @@ use std::collections::HashMap;
 use css::{Color, Rule, Selector, SimpleSelector, Stylesheet, Unit, Value};
 use html::{Node, NodeKind};
 
+const INHERITED: [&str; 9] = [
+    "color",
+    "font-family",
+    "font-size",
+    "font-style",
+    "font-weight",
+    "line-height",
+    "letter-spacing",
+    "text-align",
+    "white-space",
+];
+
 #[derive(Debug, PartialEq)]
 pub struct StyledNode<'a> {
     pub node: &'a Node,
@@ -11,37 +23,57 @@ pub struct StyledNode<'a> {
 }
 
 pub fn build<'a>(node: &'a Node, sheet: &Stylesheet) -> StyledNode<'a> {
-    build_rec(node, sheet, &[])
+    build_rec(node, sheet, &[], None)
 }
 
-fn build_rec<'a>(node: &'a Node, sheet: &Stylesheet, ancestors: &[&'a Node]) -> StyledNode<'a> {
+fn build_rec<'a>(
+    node: &'a Node,
+    sheet: &Stylesheet,
+    ancestors: &[&'a Node],
+    parent: Option<&HashMap<String, Vec<Value>>>,
+) -> StyledNode<'a> {
     let mut computed = HashMap::new();
-    if matches!(node.kind, NodeKind::Element { .. }) {
-        let mut matched: Vec<((usize, usize, usize), usize, &Rule)> = Vec::new();
-        for (i, rule) in sheet.rules.iter().enumerate() {
-            let spec = rule
-                .selectors
-                .iter()
-                .filter(|s| selector_matches(node, s, ancestors))
-                .map(|s| s.specificity())
-                .max();
-            if let Some(spec) = spec {
-                matched.push((spec, i, rule));
+    match &node.kind {
+        NodeKind::Element { .. } => {
+            let mut matched: Vec<((usize, usize, usize), usize, &Rule)> = Vec::new();
+            for (i, rule) in sheet.rules.iter().enumerate() {
+                let spec = rule
+                    .selectors
+                    .iter()
+                    .filter(|s| selector_matches(node, s, ancestors))
+                    .map(|s| s.specificity())
+                    .max();
+                if let Some(spec) = spec {
+                    matched.push((spec, i, rule));
+                }
+            }
+            matched.sort_by_key(|(spec, i, _)| (*spec, *i));
+            for (_, _, rule) in &matched {
+                for d in &rule.declarations {
+                    computed.insert(d.name.clone(), d.value.clone());
+                }
+            }
+            for key in INHERITED {
+                if !computed.contains_key(key) {
+                    if let Some(v) = parent.and_then(|m| m.get(key)) {
+                        computed.insert(key.to_string(), v.clone());
+                    }
+                }
             }
         }
-        matched.sort_by_key(|(spec, i, _)| (*spec, *i));
-        for (_, _, rule) in &matched {
-            for d in &rule.declarations {
-                computed.insert(d.name.clone(), d.value.clone());
+        NodeKind::Text(_) => {
+            if let Some(m) = parent {
+                computed = m.clone();
             }
         }
+        _ => {}
     }
     let mut chain: Vec<&Node> = ancestors.to_vec();
     chain.push(node);
     let children = node
         .children
         .iter()
-        .map(|c| build_rec(c, sheet, &chain))
+        .map(|c| build_rec(c, sheet, &chain, Some(&computed)))
         .collect();
     StyledNode {
         node,
@@ -154,13 +186,43 @@ mod tests {
     }
 
     #[test]
-    fn text_not_styled() {
+    fn text_inherits() {
         let dom = parse_html("<p>t</p>");
         let sheet = parse_css("* { color: red }");
         let s = build(&dom, &sheet);
         let p = el(&s, "p");
         assert_eq!(p.computed["color"], vec![rgb(255, 0, 0)]);
-        assert!(p.children[0].computed.is_empty());
+        assert_eq!(p.children[0].computed["color"], vec![rgb(255, 0, 0)]);
+    }
+
+    #[test]
+    fn inherited_down() {
+        let dom = parse_html("<div><p><b>t</b></p></div>");
+        let sheet = parse_css("div { color: red; font-size: 14px }");
+        let s = build(&dom, &sheet);
+        let b = el(el(el(&s, "div"), "p"), "b");
+        assert_eq!(b.computed["color"], vec![rgb(255, 0, 0)]);
+        assert_eq!(b.computed["font-size"], vec![px(14.0)]);
+    }
+
+    #[test]
+    fn not_inherited() {
+        let dom = parse_html("<div><p>t</p></div>");
+        let sheet = parse_css("div { padding: 4px; color: red }");
+        let s = build(&dom, &sheet);
+        let p = el(el(&s, "div"), "p");
+        assert!(!p.computed.contains_key("padding"));
+        assert_eq!(p.computed["color"], vec![rgb(255, 0, 0)]);
+    }
+
+    #[test]
+    fn own_beats_inherited() {
+        let dom = parse_html("<div><p>t</p></div>");
+        let sheet = parse_css("div { color: red } p { color: blue }");
+        let s = build(&dom, &sheet);
+        let p = el(el(&s, "div"), "p");
+        assert_eq!(p.computed["color"], vec![rgb(0, 0, 255)]);
+        assert_eq!(el(&s, "div").computed["color"], vec![rgb(255, 0, 0)]);
     }
 
     #[test]
