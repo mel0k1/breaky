@@ -9,6 +9,7 @@ license = "MIT"
 resolver = "2"
 members = [
     "crates/breaky-html",
+    "crates/breaky-img",
     "crates/breaky-css",
     "crates/breaky-style",
     "crates/breaky-layout",
@@ -19,6 +20,7 @@ members = [
 
 [dependencies]
 breaky-html = { path = "crates/breaky-html" }
+breaky-img = { path = "crates/breaky-img" }
 breaky-css = { path = "crates/breaky-css" }
 breaky-style = { path = "crates/breaky-style" }
 breaky-layout = { path = "crates/breaky-layout" }

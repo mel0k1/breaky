@@ -9,6 +9,7 @@ dependencies = [
  "breaky-css",
  "breaky-font",
  "breaky-html",
+ "breaky-img",
  "breaky-layout",
  "breaky-net",
  "breaky-render",
@@ -25,6 +26,10 @@ version = "0.1.0"
 
 [[package]]
 name = "breaky-html"
+version = "0.1.0"
+
+[[package]]
+name = "breaky-img"
 version = "0.1.0"
 
 [[package]]
