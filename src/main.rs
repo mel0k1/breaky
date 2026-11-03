@@ -13,7 +13,11 @@ fn main() {
     let dom = html::parse(&src);
     html::print_tree(&dom, 0);
     if let Some(css) = args.get(2) {
-        let sheet = css::parse(&fs::read_to_string(css).unwrap_or_else(fail));
+        let mut css_text = fs::read_to_string(css).unwrap_or_else(fail);
+        let mut doc_css = String::new();
+        style::collect_css(&dom, &mut doc_css);
+        css_text.push_str(&doc_css);
+        let sheet = css::parse(&css_text);
         let styled = build(&dom, &sheet);
         println!();
         print_styled(&styled, 0);

@@ -28,6 +28,22 @@ pub fn build<'a>(node: &'a Node, sheet: &Stylesheet) -> StyledNode<'a> {
     build_rec(node, sheet, &[], None, BASE_FONT)
 }
 
+pub fn collect_css(node: &Node, out: &mut String) {
+    if let NodeKind::Element { name, .. } = &node.kind {
+        if name == "style" {
+            for c in &node.children {
+                if let NodeKind::Text(t) = &c.kind {
+                    out.push_str(t);
+                    out.push('\n');
+                }
+            }
+        }
+    }
+    for c in &node.children {
+        collect_css(c, out);
+    }
+}
+
 fn build_rec<'a>(
     node: &'a Node,
     sheet: &Stylesheet,
@@ -199,6 +215,18 @@ mod tests {
         let sheet = parse_css("p { color: red }");
         let s = build(&dom, &sheet);
         assert_eq!(el(&s, "p").computed["color"], vec![rgb(0, 128, 0)]);
+    }
+
+    #[test]
+    fn style_element_collected() {
+        let dom = parse_html("<html><head><style>p { color: red }</style></head><body><p>t</p></body></html>");
+        let mut css = String::new();
+        collect_css(&dom, &mut css);
+        assert_eq!(css.trim(), "p { color: red }");
+        let sheet = parse_css(&css);
+        let s = build(&dom, &sheet);
+        let body = el(el(&s, "html"), "body");
+        assert_eq!(el(body, "p").computed["color"], vec![rgb(255, 0, 0)]);
     }
 
     #[test]
