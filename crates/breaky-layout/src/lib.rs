@@ -76,6 +76,7 @@ pub struct LayoutBox<'a> {
     pub kind: BoxKind<'a>,
     pub text: Option<&'a str>,
     pub marker: Option<&'a str>,
+    pub marker_img: Option<&'a str>,
     pub children: Vec<LayoutBox<'a>>,
     pub abs: Vec<LayoutBox<'a>>,
     ws: WS,
@@ -223,6 +224,7 @@ fn build_root<'a>(styled: &'a StyledNode<'a>) -> Option<LayoutBox<'a>> {
             abs: Vec::new(),
             children: flow,
             marker: None,
+            marker_img: None,
             ws: WS::Normal,
             align: Align::Left,
             strut: 0.0,
@@ -275,8 +277,9 @@ fn build_node<'a>(
                     _ => BoxKind::Inline(styled),
                 }
             };
-            let marker = if matches!(kind, BoxKind::Block(_)) && display(styled) == Display::ListItem
-            {
+            let is_item = matches!(kind, BoxKind::Block(_)) && display(styled) == Display::ListItem;
+            let marker_img = if is_item { list_image(styled) } else { None };
+            let marker = if is_item && marker_img.is_none() {
                 list_marker(styled, anc)
             } else {
                 None
@@ -302,6 +305,7 @@ fn build_node<'a>(
                     kind: BoxKind::Block(styled),
                     text: None,
                     marker,
+                    marker_img,
                     abs: my_abs,
                     children: group_blocks(flow, Some(styled)),
                     ws: ws_of(styled),
@@ -325,6 +329,7 @@ fn build_node<'a>(
                     kind,
                     text: None,
                     marker,
+                    marker_img,
                     abs: my_abs,
                     children,
                     ws: ws_of(styled),
@@ -425,6 +430,7 @@ fn word_box<'a>(styled: &'a StyledNode<'a>, text: &'a str, ws: WS) -> LayoutBox<
         abs: Vec::new(),
         children: Vec::new(),
         marker: None,
+        marker_img: None,
         ws,
         align: Align::Left,
         strut: 0.0,
@@ -590,6 +596,17 @@ fn caption_bottom(b: &LayoutBox) -> bool {
         .map_or(false, |v| matches!(v, Value::Keyword(k) if k == "bottom"))
 }
 
+fn list_image<'a>(styled: &'a StyledNode<'a>) -> Option<&'a str> {
+    match styled
+        .computed
+        .get("list-style-image")
+        .and_then(|v| v.first())
+    {
+        Some(Value::Url(u)) => Some(u.as_str()),
+        _ => None,
+    }
+}
+
 fn list_inside(styled: &StyledNode) -> bool {
     matches!(
         styled
@@ -659,6 +676,7 @@ fn build_table<'a>(
         kind: BoxKind::Table(styled),
         text: None,
         marker: None,
+        marker_img: None,
         abs: Vec::new(),
         children: top,
         ws: ws_of(styled),
@@ -686,6 +704,7 @@ fn build_row<'a>(
                 kind: BoxKind::Anonymous,
                 text: None,
                 marker: None,
+                marker_img: None,
                 abs: Vec::new(),
                 children: group_blocks(cf, None),
                 ws: WS::Normal,
@@ -699,6 +718,7 @@ fn build_row<'a>(
         kind: BoxKind::TableRow(styled),
         text: None,
         marker: None,
+        marker_img: None,
         abs: Vec::new(),
         children: cells,
         ws: ws_of(styled),
@@ -717,6 +737,7 @@ fn flush_cells<'a>(rows: &mut Vec<LayoutBox<'a>>, cells: &mut Vec<LayoutBox<'a>>
         kind: BoxKind::Anonymous,
         text: None,
         marker: None,
+        marker_img: None,
         abs: Vec::new(),
         children: std::mem::take(cells),
         ws: WS::Normal,
@@ -756,6 +777,7 @@ fn flush_run<'a>(
             abs: Vec::new(),
             children: std::mem::take(run),
             marker: None,
+            marker_img: None,
             ws: styled.map(ws_of).unwrap_or(WS::Normal),
             align: styled.map(align_of).unwrap_or(Align::Left),
             strut: styled.map(strut_of).unwrap_or(0.0),
@@ -1255,9 +1277,13 @@ impl<'a> LayoutBox<'a> {
             flow.x + self.dims.margin.left + self.dims.border.left + self.dims.padding.left;
         self.dims.content.y =
             flow.y + self.dims.margin.top + self.dims.border.top + self.dims.padding.top;
-        if let Some(m) = self.marker {
-            if self.element().map(list_inside).unwrap_or(false) {
-                let mw = font::width(m, font);
+        if self.element().map(list_inside).unwrap_or(false) {
+            let mw = match (self.marker, self.marker_img) {
+                (Some(m), _) => font::width(m, font),
+                (None, Some(_)) => font * 0.5 + 2.0,
+                _ => 0.0,
+            };
+            if mw > 0.0 {
                 self.dims.content.x += mw;
                 self.dims.content.width = (self.dims.content.width - mw).max(0.0);
             }
@@ -2665,6 +2691,41 @@ mod tests {
         assert_eq!(find(ul, "li").marker, Some("\u{25aa}"));
         let ol = find(&root, "ol");
         assert_eq!(find(ol, "li").marker, Some("\u{25e6}"));
+    }
+
+    #[test]
+    fn list_style_image_marker() {
+        let dom = parse_html("<html><ul><li>a</li></ul></html>");
+        let sheet = parse_css("ul { list-style-image: url(b.png) }");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let li = find(find(&root, "ul"), "li");
+        assert_eq!(li.marker, None);
+        assert_eq!(li.marker_img, Some("b.png"));
+    }
+
+    #[test]
+    fn list_style_image_none_keeps_glyph() {
+        let dom = parse_html("<html><ul><li>a</li></ul></html>");
+        let sheet = parse_css("li { list-style-image: none }");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let li = find(find(&root, "ul"), "li");
+        assert_eq!(li.marker, Some("\u{2022}"));
+        assert_eq!(li.marker_img, None);
+    }
+
+    #[test]
+    fn list_style_image_inside_indents() {
+        let dom = parse_html(
+            "<html><ul style=\"list-style-position: inside; list-style-image: url(b.png)\"><li>a</li></ul></html>",
+        );
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let li = find(find(&root, "ul"), "li");
+        assert!(eq(li.dims.content.x, 50.0));
+        assert!(eq(li.dims.content.width, 150.0));
     }
 
     #[test]

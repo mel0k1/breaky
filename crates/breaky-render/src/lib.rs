@@ -170,10 +170,9 @@ fn paint_text(canvas: &mut Canvas, b: &LayoutBox) {
 }
 
 fn paint_marker(canvas: &mut Canvas, b: &LayoutBox) {
-    let m = match b.marker {
-        Some(m) => m,
-        None => return,
-    };
+    if b.marker.is_none() && b.marker_img.is_none() {
+        return;
+    }
     let map = computed(b);
     let color = map
         .and_then(|m| token_color(m, "color"))
@@ -187,6 +186,20 @@ fn paint_marker(canvas: &mut Canvas, b: &LayoutBox) {
     let sc = font::scale(size);
     let baseline =
         b.dims.content.y + (lh - (font::ASCENT + font::DESCENT) * sc) / 2.0 + font::ASCENT * sc;
+    if b.marker_img.is_some() {
+        let side = size * 0.5;
+        canvas.fill(
+            Rect {
+                x: b.dims.content.x - 2.0 - side,
+                y: baseline - side,
+                width: side,
+                height: side,
+            },
+            color,
+        );
+        return;
+    }
+    let m = b.marker.unwrap();
     canvas.text(b.dims.content.x - font::width(m, size), baseline, m, color, size);
 }
 
@@ -566,6 +579,22 @@ mod tests {
         assert_eq!(canvas.pixel(x, 2), [0, 0, 0]);
         assert_eq!(canvas.pixel(x - 2, 2), [255, 255, 255]);
         assert_eq!(canvas.pixel(x + 1, 2), [255, 255, 255]);
+    }
+
+    #[test]
+    fn list_style_image_paints_square() {
+        let dom = parse_html("<html><ul><li>a</li></ul></html>");
+        let sheet = parse_css("li { list-style-image: url(b.png); color: #ff0000 }");
+        let styled = style_build(&dom, &sheet);
+        let tree = layout(&styled, 200.0).unwrap();
+        let canvas = paint(&tree, 200.0);
+        assert_eq!(canvas.pixel(32, 8), [255, 0, 0]);
+        assert_eq!(canvas.pixel(28, 8), [255, 255, 255]);
+        assert_eq!(canvas.pixel(39, 8), [255, 255, 255]);
+        assert_eq!(canvas.pixel(32, 4), [255, 0, 0]);
+        assert_eq!(canvas.pixel(32, 12), [255, 0, 0]);
+        assert_eq!(canvas.pixel(32, 3), [255, 255, 255]);
+        assert_eq!(canvas.pixel(32, 13), [255, 255, 255]);
     }
 
     fn parse_png(png: &[u8]) -> (u32, u32, Vec<u8>) {

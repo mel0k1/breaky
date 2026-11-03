@@ -18,6 +18,7 @@ pub enum Value {
     Keyword(String),
     Length(f32, Unit),
     Color(Color),
+    Url(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -46,6 +47,7 @@ impl fmt::Display for Value {
             Value::Keyword(k) => write!(f, "{}", k),
             Value::Length(n, u) => write!(f, "{}{}", n, u),
             Value::Color(c) => write!(f, "{}", c),
+            Value::Url(u) => write!(f, "url({})", u),
         }
     }
 }
@@ -298,7 +300,24 @@ fn token(t: &str) -> Value {
     if let Some(c) = color(t) {
         return Value::Color(c);
     }
+    if let Some(u) = url(t) {
+        return Value::Url(u);
+    }
     Value::Keyword(t.to_lowercase())
+}
+
+fn url(t: &str) -> Option<String> {
+    let inner = t.strip_prefix("url(")?.strip_suffix(')')?;
+    let u = inner.trim();
+    let v = match u.chars().next() {
+        Some(q @ ('"' | '\'')) => u.strip_prefix(q)?.strip_suffix(q)?,
+        _ => u,
+    };
+    if v.is_empty() {
+        None
+    } else {
+        Some(v.to_string())
+    }
 }
 
 fn length(t: &str) -> Option<Value> {
@@ -704,6 +723,24 @@ mod tests {
         assert_eq!(
             Value::Color(Color { r: 0, g: 0, b: 0, a: 128 }).to_string(),
             "#00000080"
+        );
+    }
+
+    #[test]
+    fn url_values() {
+        let v = parse_value("url(bullet.png)");
+        assert_eq!(v, vec![Value::Url("bullet.png".into())]);
+        let v = parse_value("url( 'a b.PNG' )");
+        assert_eq!(v, vec![Value::Url("a b.PNG".into())]);
+        assert_eq!(parse_value("url( )"), vec![Value::Keyword("url( )".into())]);
+    }
+
+    #[test]
+    fn url_inside_declaration() {
+        let sheet = parse("li { list-style-image: url(\"dot.png\") }");
+        assert_eq!(
+            sheet.rules[0].declarations[0].value,
+            vec![Value::Url("dot.png".into())]
         );
     }
 }
