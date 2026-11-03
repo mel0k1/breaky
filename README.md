@@ -48,8 +48,8 @@ Workspace of small crates:
 - [x] White-space processing
 - [x] Text alignment
 - [x] Vertical alignment
-- [ ] Lists
-- [ ] Tables
+- [x] Lists
+- [x] Tables
 
 ## License
 

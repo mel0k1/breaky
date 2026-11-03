@@ -64,6 +64,9 @@ pub enum BoxKind<'a> {
     Block(&'a StyledNode<'a>),
     Inline(&'a StyledNode<'a>),
     InlineBlock(&'a StyledNode<'a>),
+    Table(&'a StyledNode<'a>),
+    TableRow(&'a StyledNode<'a>),
+    TableCell(&'a StyledNode<'a>),
     Anonymous,
 }
 
@@ -140,6 +143,10 @@ enum Display {
     Inline,
     InlineBlock,
     ListItem,
+    Table,
+    TableRow,
+    TableCell,
+    RowGroup,
     None,
 }
 
@@ -169,6 +176,9 @@ pub fn print_tree(tree: &LayoutBox, depth: usize) {
         BoxKind::Block(s) => ("block ", s.node.name().unwrap_or("#text")),
         BoxKind::Inline(s) => ("inline", s.node.name().unwrap_or("#text")),
         BoxKind::InlineBlock(s) => ("inlbk ", s.node.name().unwrap_or("#text")),
+        BoxKind::Table(s) => ("table", s.node.name().unwrap_or("#text")),
+        BoxKind::TableRow(s) => ("trow ", s.node.name().unwrap_or("#text")),
+        BoxKind::TableCell(s) => ("tcell", s.node.name().unwrap_or("#text")),
         BoxKind::Anonymous => ("anon  ", "-"),
     };
     let d = &tree.dims.content;
@@ -233,6 +243,16 @@ fn build_node<'a>(
             if display(styled) == Display::None {
                 return (Vec::new(), Vec::new());
             }
+            if !inline_ctx {
+                let d = display(styled);
+                if d == Display::TableRow {
+                    let (row, sink) = build_row(styled, anc, root_out);
+                    return (vec![row], sink);
+                }
+                if matches!(d, Display::Table | Display::RowGroup) {
+                    return build_table(styled, anc, root_out);
+                }
+            }
             let pos = position_kw(styled);
             let oof = pos == "absolute" || pos == "fixed";
             let float = if oof || inline_ctx {
@@ -248,6 +268,7 @@ fn build_node<'a>(
                 match display(styled) {
                     Display::Block | Display::ListItem => BoxKind::Block(styled),
                     Display::InlineBlock => BoxKind::InlineBlock(styled),
+                    Display::TableCell => BoxKind::TableCell(styled),
                     _ => BoxKind::Inline(styled),
                 }
             };
@@ -569,6 +590,119 @@ fn list_inside(styled: &StyledNode) -> bool {
     )
 }
 
+fn build_table<'a>(
+    styled: &'a StyledNode<'a>,
+    anc: &[&'a StyledNode<'a>],
+    root_out: &mut Vec<LayoutBox<'a>>,
+) -> (Vec<LayoutBox<'a>>, Vec<LayoutBox<'a>>) {
+    let mut rows: Vec<LayoutBox<'a>> = Vec::new();
+    let mut cells: Vec<LayoutBox<'a>> = Vec::new();
+    let mut sink: Vec<LayoutBox<'a>> = Vec::new();
+    let mut sources: Vec<&StyledNode<'a>> = Vec::new();
+    for c in &styled.children {
+        match c.node.name() {
+            Some(n) if n == "thead" || n == "tbody" || n == "tfoot" => {
+                for g in &c.children {
+                    sources.push(g);
+                }
+            }
+            _ => sources.push(c),
+        }
+    }
+    for src in sources {
+        let d = display(src);
+        if d == Display::TableRow {
+            flush_cells(&mut rows, &mut cells);
+            let (row, cs) = build_row(src, anc, root_out);
+            sink.extend(cs);
+            rows.push(row);
+        } else if d == Display::TableCell {
+            let (cell, cs) = build_node(src, anc, root_out, false);
+            sink.extend(cs);
+            cells.extend(cell);
+        } else if matches!(d, Display::Table | Display::RowGroup) {
+            flush_cells(&mut rows, &mut cells);
+            let (t, cs) = build_table(src, anc, root_out);
+            sink.extend(cs);
+            rows.extend(t);
+        } else {
+            let (cf, cs) = build_node(src, anc, root_out, false);
+            sink.extend(cs);
+            cells.extend(cf);
+        }
+    }
+    flush_cells(&mut rows, &mut cells);
+    let b = LayoutBox {
+        dims: Dimensions::default(),
+        kind: BoxKind::Table(styled),
+        text: None,
+        marker: None,
+        abs: Vec::new(),
+        children: rows,
+        ws: ws_of(styled),
+        align: Align::Left,
+        strut: 0.0,
+    };
+    (vec![b], sink)
+}
+
+fn build_row<'a>(
+    styled: &'a StyledNode<'a>,
+    anc: &[&'a StyledNode<'a>],
+    root_out: &mut Vec<LayoutBox<'a>>,
+) -> (LayoutBox<'a>, Vec<LayoutBox<'a>>) {
+    let mut cells: Vec<LayoutBox<'a>> = Vec::new();
+    let mut sink: Vec<LayoutBox<'a>> = Vec::new();
+    for c in &styled.children {
+        let (cf, cs) = build_node(c, anc, root_out, false);
+        sink.extend(cs);
+        if display(c) == Display::TableCell {
+            cells.extend(cf);
+        } else if !cf.is_empty() {
+            cells.push(LayoutBox {
+                dims: Dimensions::default(),
+                kind: BoxKind::Anonymous,
+                text: None,
+                marker: None,
+                abs: Vec::new(),
+                children: group_blocks(cf, None),
+                ws: WS::Normal,
+                align: Align::Left,
+                strut: 0.0,
+            });
+        }
+    }
+    let row = LayoutBox {
+        dims: Dimensions::default(),
+        kind: BoxKind::TableRow(styled),
+        text: None,
+        marker: None,
+        abs: Vec::new(),
+        children: cells,
+        ws: ws_of(styled),
+        align: Align::Left,
+        strut: 0.0,
+    };
+    (row, sink)
+}
+
+fn flush_cells<'a>(rows: &mut Vec<LayoutBox<'a>>, cells: &mut Vec<LayoutBox<'a>>) {
+    if cells.is_empty() {
+        return;
+    }
+    rows.push(LayoutBox {
+        dims: Dimensions::default(),
+        kind: BoxKind::Anonymous,
+        text: None,
+        marker: None,
+        abs: Vec::new(),
+        children: std::mem::take(cells),
+        ws: WS::Normal,
+        align: Align::Left,
+        strut: 0.0,
+    });
+}
+
 fn group_blocks<'a>(
     flow: Vec<LayoutBox<'a>>,
     styled: Option<&StyledNode<'a>>,
@@ -615,6 +749,10 @@ fn display(styled: &StyledNode) -> Display {
             "inline" => Display::Inline,
             "inline-block" => Display::InlineBlock,
             "list-item" => Display::ListItem,
+            "table" => Display::Table,
+            "table-row" => Display::TableRow,
+            "table-cell" => Display::TableCell,
+            "table-row-group" | "table-header-group" | "table-footer-group" => Display::RowGroup,
             "none" => Display::None,
             _ => Display::Block,
         };
@@ -627,12 +765,15 @@ fn display(styled: &StyledNode) -> Display {
 
 fn default_display(name: &str) -> Display {
     match name {
-        "head" | "title" | "meta" | "link" | "style" | "script" | "noscript" | "template" => {
-            Display::None
-        }
+        "head" | "title" | "meta" | "link" | "style" | "script" | "noscript" | "template"
+        | "col" | "colgroup" => Display::None,
         "a" | "b" | "i" | "s" | "u" | "em" | "strong" | "span" | "code" | "small" | "sub"
         | "sup" | "label" => Display::Inline,
         "li" => Display::ListItem,
+        "table" => Display::Table,
+        "tr" => Display::TableRow,
+        "td" | "th" => Display::TableCell,
+        "thead" | "tbody" | "tfoot" => Display::RowGroup,
         _ => Display::Block,
     }
 }
@@ -640,14 +781,24 @@ fn default_display(name: &str) -> Display {
 impl<'a> LayoutBox<'a> {
     fn style(&self) -> Option<&'a StyledNode<'a>> {
         match &self.kind {
-            BoxKind::Block(s) | BoxKind::Inline(s) | BoxKind::InlineBlock(s) => Some(s),
+            BoxKind::Block(s)
+            | BoxKind::Inline(s)
+            | BoxKind::InlineBlock(s)
+            | BoxKind::Table(s)
+            | BoxKind::TableRow(s)
+            | BoxKind::TableCell(s) => Some(s),
             BoxKind::Anonymous => None,
         }
     }
 
     fn element(&self) -> Option<&'a StyledNode<'a>> {
         match &self.kind {
-            BoxKind::Block(s) | BoxKind::Inline(s) | BoxKind::InlineBlock(s)
+            BoxKind::Block(s)
+            | BoxKind::Inline(s)
+            | BoxKind::InlineBlock(s)
+            | BoxKind::Table(s)
+            | BoxKind::TableRow(s)
+            | BoxKind::TableCell(s)
                 if matches!(s.node.kind, NodeKind::Element { .. }) =>
             {
                 Some(s)
@@ -836,8 +987,141 @@ impl<'a> LayoutBox<'a> {
     fn place(&mut self, flow: &Flow, floats: &mut Vec<(Side, Rect)>, parent_font: f32) {
         match self.kind {
             BoxKind::Inline(_) => self.place_inline(flow, floats, parent_font),
+            BoxKind::Table(_) => self.place_table(flow, floats, parent_font),
             _ => self.place_block(flow, floats, parent_font, false),
         }
+    }
+
+    fn table_cols(&self, font: f32, base: f32) -> Vec<f32> {
+        let mut cols: Vec<f32> = Vec::new();
+        for row in &self.children {
+            if matches!(row.kind, BoxKind::TableRow(_) | BoxKind::Anonymous) {
+                for (i, cell) in row.children.iter().enumerate() {
+                    let w = cell.max_content_w(font, base);
+                    if i >= cols.len() {
+                        cols.resize(i + 1, 0.0);
+                    }
+                    cols[i] = cols[i].max(w);
+                }
+            }
+        }
+        cols
+    }
+
+    fn place_table(&mut self, flow: &Flow, floats: &mut Vec<(Side, Rect)>, parent_font: f32) {
+        let font = self.font(parent_font);
+        self.dims.margin = self.edges(Family::Margin, font, flow.width);
+        self.dims.border = self.edges(Family::Border, font, flow.width);
+        self.dims.padding = self.edges(Family::Padding, font, flow.width);
+        let ms = self.margin_sides(font, flow.width);
+        let ml = ms[3].unwrap_or(0.0);
+        let mr = ms[1].unwrap_or(0.0);
+        self.dims.margin.left = ml;
+        self.dims.margin.right = mr;
+        let avail = (flow.width
+            - ml
+            - mr
+            - self.dims.border.left
+            - self.dims.border.right
+            - self.dims.padding.left
+            - self.dims.padding.right)
+            .max(0.0);
+        let mut cols = self.table_cols(font, avail);
+        let ncols = cols.len();
+        let sum: f32 = cols.iter().sum();
+        let width = match self.num("width", font, flow.width) {
+            Some(w) => {
+                if ncols > 0 {
+                    if w >= sum {
+                        let extra = (w - sum) / ncols as f32;
+                        for c in cols.iter_mut() {
+                            *c += extra;
+                        }
+                    } else if sum > 0.0 {
+                        let k = w / sum;
+                        for c in cols.iter_mut() {
+                            *c *= k;
+                        }
+                    }
+                }
+                w
+            }
+            None => {
+                if sum > avail && sum > 0.0 {
+                    let k = avail / sum;
+                    for c in cols.iter_mut() {
+                        *c *= k;
+                    }
+                    avail
+                } else {
+                    sum
+                }
+            }
+        };
+        self.dims.content.width = width;
+        self.dims.content.x =
+            flow.x + ml + self.dims.border.left + self.dims.padding.left;
+        self.dims.content.y =
+            flow.y + self.dims.margin.top + self.dims.border.top + self.dims.padding.top;
+        let explicit = self.num("height", font, flow.height);
+        if let Some(h) = explicit {
+            self.dims.content.height = h;
+        }
+        let mut y = self.dims.content.y;
+        for row in &mut self.children {
+            if matches!(row.kind, BoxKind::TableRow(_) | BoxKind::Anonymous) {
+                row.dims.content.x = self.dims.content.x;
+                row.dims.content.y = y;
+                row.dims.content.width = width;
+                let mut x = self.dims.content.x;
+                let mut row_h = 0.0f32;
+                for (i, cell) in row.children.iter_mut().enumerate() {
+                    let cw = if ncols > 0 { cols[i.min(ncols - 1)] } else { 0.0 };
+                    let cfont = cell.font(font);
+                    cell.dims.margin = cell.edges(Family::Margin, cfont, avail);
+                    cell.dims.border = cell.edges(Family::Border, cfont, avail);
+                    cell.dims.padding = cell.edges(Family::Padding, cfont, avail);
+                    let fixed = cell.dims.border.left
+                        + cell.dims.border.right
+                        + cell.dims.padding.left
+                        + cell.dims.padding.right;
+                    let used = cell.dims.margin.left + cell.dims.margin.right + fixed;
+                    cell.dims.content.width = (cw - used).max(0.0);
+                    cell.dims.content.x = x
+                        + cell.dims.margin.left
+                        + cell.dims.border.left
+                        + cell.dims.padding.left;
+                    cell.dims.content.y = y
+                        + cell.dims.margin.top
+                        + cell.dims.border.top
+                        + cell.dims.padding.top;
+                    let ch = cell.num("height", cfont, avail);
+                    if let Some(h) = ch {
+                        cell.dims.content.height = h;
+                    }
+                    let mut local: Vec<(Side, Rect)> = Vec::new();
+                    cell.stack_children(&mut local, cfont, ch.is_none(), false, false);
+                    let mb = cell.dims.margin_box();
+                    row_h = row_h.max(mb.height);
+                    x += cw;
+                }
+                row.dims.content.height = row_h;
+            } else {
+                let f = Flow {
+                    x: self.dims.content.x,
+                    y,
+                    width,
+                    height: 0.0,
+                };
+                row.place(&f, floats, font);
+            }
+            let rb = row.dims.margin_box();
+            y = rb.y + rb.height;
+        }
+        if explicit.is_none() {
+            self.dims.content.height = y - self.dims.content.y;
+        }
+        self.place_abs_children(font);
     }
 
     fn place_block(
@@ -885,7 +1169,12 @@ impl<'a> LayoutBox<'a> {
         can_bottom: bool,
         top_collapsed: bool,
     ) {
-        if matches!(self.kind, BoxKind::Anonymous) {
+        let inline_run = matches!(self.kind, BoxKind::Anonymous)
+            && self
+                .children
+                .iter()
+                .all(|c| matches!(c.kind, BoxKind::Inline(_) | BoxKind::InlineBlock(_)));
+        if inline_run {
             self.flow_lines(floats, font);
             return;
         }
@@ -1360,7 +1649,9 @@ impl<'a> LayoutBox<'a> {
         let inner = match self.num("width", font, base) {
             Some(w) => w,
             None => match self.kind {
-                BoxKind::Block(_) | BoxKind::InlineBlock(_) => self
+                BoxKind::Block(_)
+                | BoxKind::InlineBlock(_)
+                | BoxKind::TableCell(_) => self
                     .children
                     .iter()
                     .map(|c| c.max_content_w(font, base))
@@ -1559,9 +1850,12 @@ mod tests {
 
     fn tag<'a>(b: &'a LayoutBox<'a>) -> &'a str {
         match &b.kind {
-            BoxKind::Block(s) | BoxKind::Inline(s) | BoxKind::InlineBlock(s) => {
-                s.node.name().unwrap_or("#text")
-            }
+            BoxKind::Block(s)
+            | BoxKind::Inline(s)
+            | BoxKind::InlineBlock(s)
+            | BoxKind::Table(s)
+            | BoxKind::TableRow(s)
+            | BoxKind::TableCell(s) => s.node.name().unwrap_or("#text"),
             BoxKind::Anonymous => "-",
         }
     }
@@ -2290,6 +2584,141 @@ mod tests {
         let root = layout(&styled, 200.0).unwrap();
         let li = find(find(&root, "ul"), "li");
         assert_eq!(li.marker, None);
+    }
+
+    #[test]
+    fn table_cell_geometry() {
+        let dom = parse_html("<html><table><tr><td>a</td><td>b</td></tr></table></html>");
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let table = find(&root, "table");
+        assert!(matches!(table.kind, BoxKind::Table(_)));
+        let w = font::width("a", 16.0);
+        assert!(eq(table.dims.content.width, w * 2.0));
+        assert!(eq(table.dims.content.height, 19.2));
+        let row = &table.children[0];
+        let c1 = &row.children[0];
+        let c2 = &row.children[1];
+        assert!(matches!(c1.kind, BoxKind::TableCell(_)));
+        assert!(eq(c1.dims.content.x, 0.0));
+        assert!(eq(c1.dims.content.width, w));
+        assert!(eq(c2.dims.content.x, w));
+    }
+
+    #[test]
+    fn table_two_rows() {
+        let dom = parse_html(
+            "<html><table><tr><td>a</td></tr><tr><td>b</td></tr></table></html>",
+        );
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let table = find(&root, "table");
+        assert_eq!(table.children.len(), 2);
+        assert!(eq(table.children[1].dims.content.y, 19.2));
+        assert!(eq(table.dims.content.height, 38.4));
+    }
+
+    #[test]
+    fn table_explicit_width_distributes() {
+        let dom = parse_html("<html><table style=\"width: 100px\"><tr><td>ab</td><td>cd</td></tr></table></html>");
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let table = find(&root, "table");
+        let row = &table.children[0];
+        assert!(eq(row.children[0].dims.content.width, 50.0));
+        assert!(eq(row.children[1].dims.content.x, 50.0));
+        assert!(eq(table.dims.content.width, 100.0));
+    }
+
+    #[test]
+    fn table_column_takes_max_cell() {
+        let dom = parse_html(
+            "<html><table><tr><td>i</td><td>a</td></tr><tr><td>wide</td><td>b</td></tr></table></html>",
+        );
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let table = find(&root, "table");
+        let w = font::width("wide", 16.0);
+        assert!(eq(table.dims.content.width, w + font::width("a", 16.0)));
+        assert!(eq(table.children[0].children[1].dims.content.x, w));
+    }
+
+    #[test]
+    fn table_cell_box_model() {
+        let dom = parse_html("<html><table><tr><td>a</td></tr></table></html>");
+        let sheet = parse_css("td { padding: 2px; border: 1px solid #000000 }");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let cell = &find(&root, "table").children[0].children[0];
+        let w = font::width("a", 16.0);
+        assert!(eq(cell.dims.content.x, 3.0));
+        assert!(eq(cell.dims.content.width, w));
+        assert!(eq(cell.dims.content.y, 3.0));
+    }
+
+    #[test]
+    fn table_shrinks_to_available() {
+        let dom = parse_html(
+            "<html><table><tr><td>aaaa</td><td>bbbb</td></tr></table></html>",
+        );
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 50.0).unwrap();
+        let table = find(&root, "table");
+        assert!(eq(table.dims.content.width, 50.0));
+        let row = &table.children[0];
+        assert!(eq(row.children[0].dims.content.width, 25.0));
+        assert!(eq(row.children[1].dims.content.x, 25.0));
+    }
+
+    #[test]
+    fn table_tbody_flattens() {
+        let dom = parse_html(
+            "<html><table><tbody><tr><td>a</td></tr></tbody></table></html>",
+        );
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let table = find(&root, "table");
+        assert_eq!(table.children.len(), 1);
+        let cell = &table.children[0].children[0];
+        assert!(matches!(cell.kind, BoxKind::TableCell(_)));
+        assert!(eq(cell.dims.content.width, font::width("a", 16.0)));
+    }
+
+    #[test]
+    fn table_anonymous_cell_for_text() {
+        let dom = parse_html("<html><table><tr>text<td>b</td></tr></table></html>");
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let row = &find(&root, "table").children[0];
+        assert_eq!(row.children.len(), 2);
+        assert!(matches!(row.children[0].kind, BoxKind::Anonymous));
+        let w = font::width("text", 16.0);
+        assert!(eq(row.children[0].dims.content.width, w));
+        assert!(eq(row.children[1].dims.content.x, w));
+    }
+
+    #[test]
+    fn table_display_css_keywords() {
+        let dom = parse_html(
+            "<html><div style=\"display: table\"><p style=\"display: table-row\"><b style=\"display: table-cell\">x</b></p></div></html>",
+        );
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let div = find(&root, "div");
+        assert!(matches!(div.kind, BoxKind::Table(_)));
+        let p = find(div, "p");
+        assert!(matches!(p.kind, BoxKind::TableRow(_)));
+        let b = find(p, "b");
+        assert!(matches!(b.kind, BoxKind::TableCell(_)));
+        assert!(eq(b.dims.content.width, font::width("x", 16.0)));
     }
 
     #[test]
