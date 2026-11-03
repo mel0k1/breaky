@@ -63,6 +63,7 @@ impl Dimensions {
 pub enum BoxKind<'a> {
     Block(&'a StyledNode<'a>),
     Inline(&'a StyledNode<'a>),
+    InlineBlock(&'a StyledNode<'a>),
     Anonymous,
 }
 
@@ -92,6 +93,7 @@ enum Family {
 enum Display {
     Block,
     Inline,
+    InlineBlock,
     None,
 }
 
@@ -120,6 +122,7 @@ pub fn print_tree(tree: &LayoutBox, depth: usize) {
     let (label, tag) = match &tree.kind {
         BoxKind::Block(s) => ("block ", s.node.name().unwrap_or("#text")),
         BoxKind::Inline(s) => ("inline", s.node.name().unwrap_or("#text")),
+        BoxKind::InlineBlock(s) => ("inlbk ", s.node.name().unwrap_or("#text")),
         BoxKind::Anonymous => ("anon  ", "-"),
     };
     let d = &tree.dims.content;
@@ -183,6 +186,12 @@ fn boxes_for<'a>(styled: &'a StyledNode<'a>) -> Vec<LayoutBox<'a>> {
                     text: None,
                     children: inline_children(styled),
                 }],
+                Display::InlineBlock => vec![LayoutBox {
+                    dims: Dimensions::default(),
+                    kind: BoxKind::InlineBlock(styled),
+                    text: None,
+                    children: block_children(styled),
+                }],
                 Display::Block => vec![LayoutBox {
                     dims: Dimensions::default(),
                     kind: BoxKind::Block(styled),
@@ -202,12 +211,21 @@ fn inline_children<'a>(styled: &'a StyledNode<'a>) -> Vec<LayoutBox<'a>> {
 
 fn inline_boxes<'a>(styled: &'a StyledNode<'a>) -> Vec<LayoutBox<'a>> {
     match &styled.node.kind {
-        NodeKind::Element { .. } if display(styled) != Display::None => vec![LayoutBox {
-            dims: Dimensions::default(),
-            kind: BoxKind::Inline(styled),
-            text: None,
-            children: inline_children(styled),
-        }],
+        NodeKind::Element { .. } => match display(styled) {
+            Display::None => Vec::new(),
+            Display::InlineBlock => vec![LayoutBox {
+                dims: Dimensions::default(),
+                kind: BoxKind::InlineBlock(styled),
+                text: None,
+                children: block_children(styled),
+            }],
+            _ => vec![LayoutBox {
+                dims: Dimensions::default(),
+                kind: BoxKind::Inline(styled),
+                text: None,
+                children: inline_children(styled),
+            }],
+        },
         NodeKind::Text(src) => text_boxes(styled, src),
         _ => Vec::new(),
     }
@@ -263,7 +281,7 @@ fn block_children<'a>(styled: &'a StyledNode<'a>) -> Vec<LayoutBox<'a>> {
     let mut run: Vec<LayoutBox<'a>> = Vec::new();
     for c in &styled.children {
         for b in boxes_for(c) {
-            if matches!(b.kind, BoxKind::Inline(_)) {
+            if matches!(b.kind, BoxKind::Inline(_) | BoxKind::InlineBlock(_)) {
                 run.push(b);
             } else {
                 flush_run(&mut out, &mut run);
@@ -293,6 +311,9 @@ fn display(styled: &StyledNode) -> Display {
         if k == "inline" {
             return Display::Inline;
         }
+        if k == "inline-block" {
+            return Display::InlineBlock;
+        }
         if k == "none" {
             return Display::None;
         }
@@ -317,14 +338,14 @@ fn default_display(name: &str) -> Display {
 impl<'a> LayoutBox<'a> {
     fn style(&self) -> Option<&'a StyledNode<'a>> {
         match &self.kind {
-            BoxKind::Block(s) | BoxKind::Inline(s) => Some(s),
+            BoxKind::Block(s) | BoxKind::Inline(s) | BoxKind::InlineBlock(s) => Some(s),
             BoxKind::Anonymous => None,
         }
     }
 
     fn element(&self) -> Option<&'a StyledNode<'a>> {
         match &self.kind {
-            BoxKind::Block(s) | BoxKind::Inline(s)
+            BoxKind::Block(s) | BoxKind::Inline(s) | BoxKind::InlineBlock(s)
                 if matches!(s.node.kind, NodeKind::Element { .. }) =>
             {
                 Some(s)
@@ -577,6 +598,25 @@ impl<'a> LayoutBox<'a> {
             if space && (line_start || prev_space) {
                 continue;
             }
+            if matches!(child.kind, BoxKind::InlineBlock(_)) {
+                let (l, r) = band(floats, cy, 0.0, full_l, full_r);
+                let avail = (r - l).max(0.0);
+                let x = if line_start { l } else { cx };
+                child.layout_atomic(x, cy, avail, floats, font);
+                let mut mb = child.dims.margin_box();
+                if !line_start && mb.x + mb.width > full_r {
+                    cy += line;
+                    line = 0.0;
+                    let (l2, r2) = band(floats, cy, 0.0, full_l, full_r);
+                    child.layout_atomic(l2, cy, (r2 - l2).max(0.0), floats, font);
+                    mb = child.dims.margin_box();
+                }
+                cx = mb.x + mb.width;
+                line = line.max(mb.height);
+                line_start = false;
+                prev_space = false;
+                continue;
+            }
             let mw = child.measure_w(font, full_r - full_l);
             let mh = child.measure_h(font, full_r - full_l);
             let (l, r) = band(floats, cy, mh.max(line), full_l, full_r);
@@ -649,6 +689,25 @@ impl<'a> LayoutBox<'a> {
         for child in &mut self.children {
             let space = child.text == Some(" ");
             if space && (line_start || prev_space) {
+                continue;
+            }
+            if matches!(child.kind, BoxKind::InlineBlock(_)) {
+                let avail = limit
+                    .map(|lim| (lim - self.dims.content.x).max(0.0))
+                    .unwrap_or(flow.width.max(0.0));
+                child.layout_atomic(cx, cy, avail, floats, font);
+                let mut mb = child.dims.margin_box();
+                if !line_start && limit.map_or(false, |lim| mb.x + mb.width > lim) {
+                    cx = self.dims.content.x;
+                    cy += line;
+                    line = 0.0;
+                    child.layout_atomic(cx, cy, avail, floats, font);
+                    mb = child.dims.margin_box();
+                }
+                cx = mb.x + mb.width;
+                line = line.max(mb.height);
+                line_start = false;
+                prev_space = false;
                 continue;
             }
             let mw = child.measure_w(font, flow.width);
@@ -809,6 +868,62 @@ impl<'a> LayoutBox<'a> {
         m.left + m.right + b.left + b.right + p.left + p.right + w
     }
 
+    fn max_content_w(&self, font: f32, base: f32) -> f32 {
+        if let Some(t) = self.text {
+            return font::width(t, font);
+        }
+        let m = self.edges(Family::Margin, font, base);
+        let b = self.edges(Family::Border, font, base);
+        let p = self.edges(Family::Padding, font, base);
+        let inner = match self.num("width", font, base) {
+            Some(w) => w,
+            None => match self.kind {
+                BoxKind::Block(_) | BoxKind::InlineBlock(_) => self
+                    .children
+                    .iter()
+                    .map(|c| c.max_content_w(font, base))
+                    .fold(0.0f32, f32::max),
+                _ => self
+                    .children
+                    .iter()
+                    .map(|c| c.max_content_w(font, base))
+                    .sum::<f32>(),
+            },
+        };
+        m.left + m.right + b.left + b.right + p.left + p.right + inner
+    }
+
+    fn layout_atomic(
+        &mut self,
+        x: f32,
+        y: f32,
+        avail: f32,
+        floats: &mut Vec<(Side, Rect)>,
+        parent_font: f32,
+    ) {
+        let font = self.font(parent_font);
+        self.dims.margin = self.edges(Family::Margin, font, avail);
+        self.dims.border = self.edges(Family::Border, font, avail);
+        self.dims.padding = self.edges(Family::Padding, font, avail);
+        let fixed = self.dims.border.left
+            + self.dims.border.right
+            + self.dims.padding.left
+            + self.dims.padding.right;
+        let used = self.dims.margin.left + self.dims.margin.right + fixed;
+        let room = (avail - used).max(0.0);
+        let pref = (self.max_content_w(font, avail) - used).max(0.0);
+        self.dims.content.width = self.num("width", font, avail).unwrap_or(pref.min(room));
+        self.dims.content.x =
+            x + self.dims.margin.left + self.dims.border.left + self.dims.padding.left;
+        self.dims.content.y =
+            y + self.dims.margin.top + self.dims.border.top + self.dims.padding.top;
+        let explicit = self.num("height", font, avail);
+        if let Some(h) = explicit {
+            self.dims.content.height = h;
+        }
+        self.stack_children(floats, font, explicit.is_none(), false, false);
+    }
+
     fn measure_h(&self, parent_font: f32, base: f32) -> f32 {
         let font = self.font(parent_font);
         let m = self.edges(Family::Margin, font, base);
@@ -877,7 +992,9 @@ mod tests {
 
     fn tag<'a>(b: &'a LayoutBox<'a>) -> &'a str {
         match &b.kind {
-            BoxKind::Block(s) | BoxKind::Inline(s) => s.node.name().unwrap_or("#text"),
+            BoxKind::Block(s) | BoxKind::Inline(s) | BoxKind::InlineBlock(s) => {
+                s.node.name().unwrap_or("#text")
+            }
             BoxKind::Anonymous => "-",
         }
     }
@@ -1340,5 +1457,63 @@ mod tests {
         let div = find(&root, "div");
         assert_eq!(div.children.len(), 2);
         assert!(eq(find(div, "p").dims.content.y, 0.0));
+    }
+
+    #[test]
+    fn inline_block_shrink_to_fit() {
+        let dom = parse_html("<html><div><p style=\"display:inline-block\">hi</p></div></html>");
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let div = find(&root, "div");
+        assert!(matches!(div.children[0].kind, BoxKind::Anonymous));
+        let ib = find(&div.children[0], "p");
+        assert!(matches!(ib.kind, BoxKind::InlineBlock(_)));
+        assert!(eq(ib.dims.content.width, font::width("hi", 16.0)));
+        assert!(eq(ib.dims.content.height, 19.2));
+    }
+
+    #[test]
+    fn inline_block_explicit_width() {
+        let dom = parse_html("<html><div><p style=\"display:inline-block\">hi</p></div></html>");
+        let sheet = parse_css("p { width: 40px; height: 10px }");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let div = find(&root, "div");
+        let ib = find(&div.children[0], "p");
+        assert!(eq(ib.dims.content.width, 40.0));
+        assert!(eq(ib.dims.content.height, 10.0));
+    }
+
+    #[test]
+    fn inline_block_side_by_side() {
+        let dom = parse_html("<html><div><a style=\"display:inline-block\">aa</a> <a style=\"display:inline-block\">bb</a></div></html>");
+        let sheet = parse_css("a { padding: 2px }");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let div = find(&root, "div");
+        let anon = &div.children[0];
+        let a1 = find(anon, "a");
+        let gap = font::width(" ", 16.0);
+        let a2 = &anon.children[2];
+        assert!(eq(
+            a2.dims.content.x - a1.dims.content.x,
+            a1.dims.margin_box().width + gap
+        ));
+        assert!(eq(a1.dims.content.height, 19.2));
+    }
+
+    #[test]
+    fn inline_block_wraps_whole() {
+        let dom = parse_html("<html><div><a style=\"display:inline-block\">aaaa</a> <a style=\"display:inline-block\">bbbb</a></div></html>");
+        let sheet = parse_css("a { padding: 2px }");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 60.0).unwrap();
+        let div = find(&root, "div");
+        let anon = &div.children[0];
+        let a2 = &anon.children[2];
+        assert!(eq(a2.dims.border_box().x, 0.0));
+        assert!(eq(a2.dims.border_box().y, 23.2));
+        assert!(eq(a2.dims.content.width, font::width("bbbb", 16.0)));
     }
 }

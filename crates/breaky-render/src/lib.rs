@@ -256,7 +256,7 @@ fn is_float(b: &LayoutBox) -> bool {
 
 fn computed<'a>(b: &'a LayoutBox<'a>) -> Option<&'a std::collections::HashMap<String, Vec<Value>>> {
     match &b.kind {
-        BoxKind::Block(s) | BoxKind::Inline(s) => Some(&s.computed),
+        BoxKind::Block(s) | BoxKind::Inline(s) | BoxKind::InlineBlock(s) => Some(&s.computed),
         BoxKind::Anonymous => None,
     }
 }
