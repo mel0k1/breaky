@@ -44,6 +44,12 @@ Workspace of small crates:
 - [x] Rendering
 - [x] Text and fonts
 - [x] Networking
+- [x] HTML entities
+- [x] White-space processing
+- [x] Text alignment
+- [x] Vertical alignment
+- [ ] Lists
+- [ ] Tables
 
 ## License
 
