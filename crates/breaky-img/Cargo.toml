@@ -2,7 +2,7 @@
 name = "breaky-img"
 version = "0.1.0"
 edition = "2021"
-description = "PNG decoder for Breaky"
+description = "Image decoders for Breaky"
 license = "MIT"
 
 [lib]
