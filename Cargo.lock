@@ -7,6 +7,7 @@ name = "breaky"
 version = "0.1.0"
 dependencies = [
  "breaky-css",
+ "breaky-font",
  "breaky-html",
  "breaky-layout",
  "breaky-render",
@@ -18,6 +19,10 @@ name = "breaky-css"
 version = "0.1.0"
 
 [[package]]
+name = "breaky-font"
+version = "0.1.0"
+
+[[package]]
 name = "breaky-html"
 version = "0.1.0"
 
@@ -26,6 +31,7 @@ name = "breaky-layout"
 version = "0.1.0"
 dependencies = [
  "breaky-css",
+ "breaky-font",
  "breaky-html",
  "breaky-style",
 ]
@@ -35,6 +41,7 @@ name = "breaky-render"
 version = "0.1.0"
 dependencies = [
  "breaky-css",
+ "breaky-font",
  "breaky-html",
  "breaky-layout",
  "breaky-style",

@@ -1,0 +1,10 @@
+[package]
+name = "breaky-font"
+version = "0.1.0"
+edition = "2021"
+description = "Embedded bitmap font and glyph metrics"
+license = "MIT"
+
+[lib]
+name = "font"
+path = "src/lib.rs"

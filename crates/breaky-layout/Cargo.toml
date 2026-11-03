@@ -13,3 +13,4 @@ path = "src/lib.rs"
 breaky-html = { path = "../breaky-html" }
 breaky-css = { path = "../breaky-css" }
 breaky-style = { path = "../breaky-style" }
+breaky-font = { path = "../breaky-font" }
