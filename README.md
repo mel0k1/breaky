@@ -21,6 +21,7 @@ Workspace of small crates:
 - `breaky-html` — HTML tokenizer and DOM
 - `breaky-css` — CSS parser
 - `breaky-style` — selector matching and cascade
+- `breaky-layout` — box tree and block/inline layout
 - `breaky` — CLI
 
 ## Roadmap
@@ -31,7 +32,7 @@ Workspace of small crates:
 - [x] Style engine
 - [x] Inheritance
 - [x] Typed values
-- [ ] Layout
+- [x] Layout
 - [ ] Rendering
 - [ ] Networking
 
