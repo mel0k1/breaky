@@ -300,6 +300,7 @@ fn computed<'a>(b: &'a LayoutBox<'a>) -> Option<&'a std::collections::HashMap<St
         BoxKind::Block(s)
         | BoxKind::Inline(s)
         | BoxKind::InlineBlock(s)
+        | BoxKind::Flex(s)
         | BoxKind::Table(s)
         | BoxKind::TableRow(s)
         | BoxKind::TableCell(s) => Some(&s.computed),

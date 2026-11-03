@@ -64,6 +64,7 @@ pub enum BoxKind<'a> {
     Block(&'a StyledNode<'a>),
     Inline(&'a StyledNode<'a>),
     InlineBlock(&'a StyledNode<'a>),
+    Flex(&'a StyledNode<'a>),
     Table(&'a StyledNode<'a>),
     TableRow(&'a StyledNode<'a>),
     TableCell(&'a StyledNode<'a>),
@@ -149,6 +150,7 @@ enum Display {
     TableCell,
     RowGroup,
     TableCaption,
+    Flex,
     None,
 }
 
@@ -178,6 +180,7 @@ pub fn print_tree(tree: &LayoutBox, depth: usize) {
         BoxKind::Block(s) => ("block ", s.node.name().unwrap_or("#text")),
         BoxKind::Inline(s) => ("inline", s.node.name().unwrap_or("#text")),
         BoxKind::InlineBlock(s) => ("inlbk ", s.node.name().unwrap_or("#text")),
+        BoxKind::Flex(s) => ("flex ", s.node.name().unwrap_or("#text")),
         BoxKind::Table(s) => ("table", s.node.name().unwrap_or("#text")),
         BoxKind::TableRow(s) => ("trow ", s.node.name().unwrap_or("#text")),
         BoxKind::TableCell(s) => ("tcell", s.node.name().unwrap_or("#text")),
@@ -272,6 +275,7 @@ fn build_node<'a>(
                     Display::Block | Display::ListItem | Display::TableCaption => {
                         BoxKind::Block(styled)
                     }
+                    Display::Flex => BoxKind::Flex(styled),
                     Display::InlineBlock => BoxKind::InlineBlock(styled),
                     Display::TableCell => BoxKind::TableCell(styled),
                     _ => BoxKind::Inline(styled),
@@ -798,6 +802,7 @@ fn display(styled: &StyledNode) -> Display {
             "table-cell" => Display::TableCell,
             "table-row-group" | "table-header-group" | "table-footer-group" => Display::RowGroup,
             "table-caption" => Display::TableCaption,
+            "flex" | "inline-flex" => Display::Flex,
             "none" => Display::None,
             _ => Display::Block,
         };
@@ -830,6 +835,7 @@ impl<'a> LayoutBox<'a> {
             BoxKind::Block(s)
             | BoxKind::Inline(s)
             | BoxKind::InlineBlock(s)
+            | BoxKind::Flex(s)
             | BoxKind::Table(s)
             | BoxKind::TableRow(s)
             | BoxKind::TableCell(s) => Some(s),
@@ -842,6 +848,7 @@ impl<'a> LayoutBox<'a> {
             BoxKind::Block(s)
             | BoxKind::Inline(s)
             | BoxKind::InlineBlock(s)
+            | BoxKind::Flex(s)
             | BoxKind::Table(s)
             | BoxKind::TableRow(s)
             | BoxKind::TableCell(s)
@@ -1034,6 +1041,7 @@ impl<'a> LayoutBox<'a> {
         match self.kind {
             BoxKind::Inline(_) => self.place_inline(flow, floats, parent_font),
             BoxKind::Table(_) => self.place_table(flow, floats, parent_font),
+            BoxKind::Flex(_) => self.place_flex(flow, floats, parent_font),
             _ => self.place_block(flow, floats, parent_font, false),
         }
     }
@@ -1248,6 +1256,250 @@ impl<'a> LayoutBox<'a> {
             self.dims.content.height = y - self.dims.content.y;
         }
         self.place_abs_children(font);
+    }
+
+    fn place_flex(&mut self, flow: &Flow, floats: &mut Vec<(Side, Rect)>, parent_font: f32) {
+        let font = self.font(parent_font);
+        self.dims.margin = self.edges(Family::Margin, font, flow.width);
+        self.dims.border = self.edges(Family::Border, font, flow.width);
+        self.dims.padding = self.edges(Family::Padding, font, flow.width);
+        self.resolve_width(flow.width, font);
+        let explicit_h = self.num("height", font, flow.height);
+        if let Some(h) = explicit_h {
+            self.dims.content.height = h;
+        }
+        self.dims.content.x =
+            flow.x + self.dims.margin.left + self.dims.border.left + self.dims.padding.left;
+        self.dims.content.y =
+            flow.y + self.dims.margin.top + self.dims.border.top + self.dims.padding.top;
+        let column = self
+            .style()
+            .and_then(|s| s.computed.get("flex-direction"))
+            .and_then(|v| v.first())
+            .map_or(false, |v| matches!(v, Value::Keyword(k) if k == "column"));
+        let (row_gap, col_gap) = self.flex_gaps(font, flow.width);
+        if column {
+            self.flex_column(floats, font, explicit_h.is_some(), row_gap, col_gap);
+        } else {
+            self.flex_row(floats, font, explicit_h.is_some(), row_gap, col_gap);
+        }
+        self.place_abs_children(font);
+    }
+
+    fn flex_gaps(&self, font: f32, base: f32) -> (f32, f32) {
+        let el = match self.element() {
+            Some(e) => e,
+            None => return (0.0, 0.0),
+        };
+        let mut row = el
+            .computed
+            .get("row-gap")
+            .and_then(|v| v.first())
+            .and_then(|v| len_or(v, font, base));
+        let mut col = el
+            .computed
+            .get("column-gap")
+            .and_then(|v| v.first())
+            .and_then(|v| len_or(v, font, base));
+        if let Some(vals) = el.computed.get("gap") {
+            let g: Vec<f32> = vals.iter().filter_map(|v| len_or(v, font, base)).collect();
+            if g.len() == 1 {
+                row = Some(g[0]);
+                col = Some(g[0]);
+            } else if g.len() >= 2 {
+                row = Some(g[0]);
+                col = Some(g[1]);
+            }
+        }
+        (row.unwrap_or(0.0), col.unwrap_or(0.0))
+    }
+
+    fn flex_row(
+        &mut self,
+        floats: &mut Vec<(Side, Rect)>,
+        font: f32,
+        has_h: bool,
+        _row_gap: f32,
+        col_gap: f32,
+    ) {
+        let inner_w = self.dims.content.width;
+        let n = self.children.len();
+        let mut bases: Vec<f32> = Vec::new();
+        let mut grows: Vec<f32> = Vec::new();
+        let mut shrinks: Vec<f32> = Vec::new();
+        let mut fixed: Vec<(f32, f32)> = Vec::new();
+        for item in &self.children {
+            let f = item.font(font);
+            let m = item.edges(Family::Margin, f, inner_w);
+            let b = item.edges(Family::Border, f, inner_w);
+            let p = item.edges(Family::Padding, f, inner_w);
+            let fx = m.left + m.right + b.left + b.right + p.left + p.right;
+            let fy = m.top + m.bottom + b.top + b.bottom + p.top + p.bottom;
+            let basis = flex_basis(item, f, inner_w);
+            let base = basis.unwrap_or_else(|| (item.max_content_w(f, inner_w) - fx).max(0.0));
+            let (g, s) = flex_gs(item);
+            bases.push(base);
+            grows.push(g);
+            shrinks.push(s);
+            fixed.push((fx, fy));
+        }
+        let main_fixed: Vec<f32> = fixed.iter().map(|f| f.0).collect();
+        flex_distribute(
+            &mut bases,
+            &grows,
+            &shrinks,
+            &main_fixed,
+            inner_w,
+            col_gap * (n.saturating_sub(1)) as f32,
+        );
+        let used: f32 = (0..n).map(|i| bases[i] + fixed[i].0).sum::<f32>()
+            + col_gap * (n.saturating_sub(1)) as f32;
+        let free = (inner_w - used).max(0.0);
+        let (start, extra) = justify_of(self.style(), n, free);
+        let mut cursor = self.dims.content.x + start;
+        let mut outer_h: Vec<f32> = Vec::new();
+        for i in 0..n {
+            let item = &mut self.children[i];
+            let f = item.font(font);
+            item.dims.margin = item.edges(Family::Margin, f, inner_w);
+            item.dims.border = item.edges(Family::Border, f, inner_w);
+            item.dims.padding = item.edges(Family::Padding, f, inner_w);
+            item.dims.content.width = bases[i];
+            item.dims.content.x = cursor
+                + item.dims.margin.left
+                + item.dims.border.left
+                + item.dims.padding.left;
+            item.dims.content.y = self.dims.content.y
+                + item.dims.margin.top
+                + item.dims.border.top
+                + item.dims.padding.top;
+            let ih = item.num("height", f, inner_w).is_some();
+            item.stack_children(floats, f, !ih, false, false);
+            let mb = item.dims.margin_box();
+            outer_h.push(mb.height);
+            cursor += bases[i] + fixed[i].0 + col_gap + extra;
+        }
+        let inner_h = if has_h {
+            self.dims.content.height
+        } else {
+            outer_h.iter().fold(0.0f32, |a, &b| a.max(b))
+        };
+        let cont = self.style();
+        for i in 0..n {
+            let item = &mut self.children[i];
+            let f = item.font(font);
+            let ih_item = item.num("height", f, inner_w).is_some();
+            match align_self(item.element(), cont) {
+                AlignSelf::Stretch if !ih_item => {
+                    item.dims.content.height = (inner_h - fixed[i].1).max(0.0);
+                }
+                AlignSelf::End => item.shift(0.0, inner_h - outer_h[i]),
+                AlignSelf::Center => item.shift(0.0, (inner_h - outer_h[i]) / 2.0),
+                _ => {}
+            }
+            item.apply_relative(f, inner_w);
+        }
+        if !has_h {
+            self.dims.content.height = inner_h;
+        }
+    }
+
+    fn flex_column(
+        &mut self,
+        floats: &mut Vec<(Side, Rect)>,
+        font: f32,
+        has_h: bool,
+        row_gap: f32,
+        _col_gap: f32,
+    ) {
+        let inner_w = self.dims.content.width;
+        let n = self.children.len();
+        let mut bases: Vec<f32> = Vec::new();
+        let mut grows: Vec<f32> = Vec::new();
+        let mut shrinks: Vec<f32> = Vec::new();
+        let mut fixed: Vec<(f32, f32)> = Vec::new();
+        let cont = self.style();
+        for i in 0..n {
+            let item = &mut self.children[i];
+            let f = item.font(font);
+            item.dims.margin = item.edges(Family::Margin, f, inner_w);
+            item.dims.border = item.edges(Family::Border, f, inner_w);
+            item.dims.padding = item.edges(Family::Padding, f, inner_w);
+            let m = item.dims.margin;
+            let b = item.dims.border;
+            let p = item.dims.padding;
+            let fx = m.left + m.right + b.left + b.right + p.left + p.right;
+            let fy = m.top + m.bottom + b.top + b.bottom + p.top + p.bottom;
+            let align = align_self(item.element(), cont);
+            let has_iw = item.num("width", f, inner_w).is_some();
+            let nat = (item.max_content_w(f, inner_w) - fx).max(0.0);
+            let w = if align == AlignSelf::Stretch && !has_iw {
+                (inner_w - fx).max(0.0)
+            } else {
+                nat.min((inner_w - fx).max(0.0))
+            };
+            item.dims.content.width = w;
+            item.dims.content.x = match align {
+                AlignSelf::End => {
+                    self.dims.content.x + (inner_w - fx - w).max(0.0) + m.left + b.left + p.left
+                }
+                AlignSelf::Center => {
+                    self.dims.content.x + (inner_w - fx - w).max(0.0) / 2.0
+                        + m.left
+                        + b.left
+                        + p.left
+                }
+                _ => self.dims.content.x + m.left + b.left + p.left,
+            };
+            item.dims.content.y = self.dims.content.y + m.top + b.top + p.top;
+            let ih = item.num("height", f, inner_w).is_some();
+            item.stack_children(floats, f, !ih, false, false);
+            let (g, s) = flex_gs(item);
+            let base = item
+                .num("height", f, inner_w)
+                .unwrap_or(item.dims.content.height);
+            bases.push(base);
+            grows.push(g);
+            shrinks.push(s);
+            fixed.push((fx, fy));
+        }
+        if has_h {
+            let cross_fixed: Vec<f32> = fixed.iter().map(|f| f.1).collect();
+            flex_distribute(
+                &mut bases,
+                &grows,
+                &shrinks,
+                &cross_fixed,
+                self.dims.content.height,
+                row_gap * (n.saturating_sub(1)) as f32,
+            );
+        }
+        let gaps = row_gap * (n.saturating_sub(1)) as f32;
+        let used: f32 = (0..n).map(|i| bases[i] + fixed[i].1).sum::<f32>() + gaps;
+        let inner_h = if has_h {
+            self.dims.content.height
+        } else {
+            used
+        };
+        let free = (inner_h - used).max(0.0);
+        let (start, extra) = justify_of(self.style(), n, free);
+        let mut cursor = self.dims.content.y + start;
+        for i in 0..n {
+            let item = &mut self.children[i];
+            let f = item.font(font);
+            let target = cursor
+                + item.dims.margin.top
+                + item.dims.border.top
+                + item.dims.padding.top;
+            let dy = target - item.dims.content.y;
+            item.dims.content.height = bases[i];
+            item.shift(0.0, dy);
+            item.apply_relative(f, inner_w);
+            cursor += bases[i] + fixed[i].1 + row_gap + extra;
+        }
+        if !has_h {
+            self.dims.content.height = cursor - row_gap - extra - self.dims.content.y;
+        }
     }
 
     fn place_block(
@@ -1967,6 +2219,189 @@ fn collapse(a: f32, b: f32) -> f32 {
     }
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum AlignSelf {
+    Stretch,
+    Start,
+    End,
+    Center,
+}
+
+fn justify_of(styled: Option<&StyledNode>, n: usize, free: f32) -> (f32, f32) {
+    let kw = styled
+        .and_then(|s| s.computed.get("justify-content"))
+        .and_then(|v| v.first());
+    let k = match kw {
+        Some(Value::Keyword(k)) => k.as_str(),
+        _ => "flex-start",
+    };
+    match k {
+        "flex-end" | "end" => (free, 0.0),
+        "center" => (free / 2.0, 0.0),
+        "space-between" => {
+            if n > 1 {
+                (0.0, free / (n - 1) as f32)
+            } else {
+                (0.0, 0.0)
+            }
+        }
+        "space-around" => {
+            let g = free / n as f32;
+            (g / 2.0, g)
+        }
+        "space-evenly" => {
+            let g = free / (n + 1) as f32;
+            (g, g)
+        }
+        _ => (0.0, 0.0),
+    }
+}
+
+fn align_self(
+    item: Option<&StyledNode>,
+    container: Option<&StyledNode>,
+) -> AlignSelf {
+    let own = item
+        .and_then(|s| s.computed.get("align-self"))
+        .and_then(|v| v.first())
+        .filter(|v| !matches!(v, Value::Keyword(k) if k == "auto"));
+    let kw = own.or_else(|| {
+        container
+            .and_then(|s| s.computed.get("align-items"))
+            .and_then(|v| v.first())
+    });
+    match kw {
+        Some(Value::Keyword(k)) => match k.as_str() {
+            "flex-start" | "start" => AlignSelf::Start,
+            "flex-end" | "end" => AlignSelf::End,
+            "center" => AlignSelf::Center,
+            _ => AlignSelf::Stretch,
+        },
+        _ => AlignSelf::Stretch,
+    }
+}
+
+fn flex_num(v: &Value) -> Option<f32> {
+    match v {
+        Value::Keyword(k) => k.parse::<f32>().ok(),
+        Value::Length(n, _) if *n == 0.0 => Some(0.0),
+        _ => None,
+    }
+}
+
+fn flex_gs(item: &LayoutBox) -> (f32, f32) {
+    let el = match item.element() {
+        Some(e) => e,
+        None => return (0.0, 1.0),
+    };
+    let mut grow = el
+        .computed
+        .get("flex-grow")
+        .and_then(|v| v.first())
+        .and_then(flex_num);
+    let mut shrink = el
+        .computed
+        .get("flex-shrink")
+        .and_then(|v| v.first())
+        .and_then(flex_num);
+    if let Some(vals) = el.computed.get("flex") {
+        let mut nums: Vec<f32> = Vec::new();
+        for v in vals {
+            if let Value::Keyword(k) = v {
+                if k == "none" {
+                    grow = Some(0.0);
+                    shrink = Some(0.0);
+                    continue;
+                }
+                if k == "auto" {
+                    continue;
+                }
+            }
+            match flex_num(v) {
+                Some(x) => nums.push(x),
+                None => break,
+            }
+        }
+        if grow.is_none() {
+            if let Some(&g) = nums.first() {
+                grow = Some(g);
+            }
+        }
+        if shrink.is_none() {
+            if let Some(&s) = nums.get(1) {
+                shrink = Some(s);
+            }
+        }
+    }
+    (grow.unwrap_or(0.0), shrink.unwrap_or(1.0))
+}
+
+fn flex_basis(item: &LayoutBox, font: f32, base: f32) -> Option<f32> {
+    let el = item.element()?;
+    if let Some(v) = el.computed.get("flex-basis").and_then(|v| v.first()) {
+        if matches!(v, Value::Keyword(k) if k == "auto") {
+            return None;
+        }
+        return len_or(v, font, base);
+    }
+    let vals = el.computed.get("flex")?;
+    let mut any_num = false;
+    let mut basis: Option<&Value> = None;
+    for v in vals {
+        if let Value::Keyword(k) = v {
+            if k == "none" || k == "auto" {
+                return None;
+            }
+        }
+        match flex_num(v) {
+            Some(_) => any_num = true,
+            None => basis = Some(v),
+        }
+    }
+    match basis {
+        Some(v) => len_or(v, font, base),
+        None => {
+            if any_num {
+                Some(0.0)
+            } else {
+                None
+            }
+        }
+    }
+}
+
+fn flex_distribute(
+    bases: &mut [f32],
+    grows: &[f32],
+    shrinks: &[f32],
+    fixed: &[f32],
+    inner: f32,
+    gaps: f32,
+) {
+    let n = bases.len();
+    let used: f32 = (0..n).map(|i| bases[i] + fixed[i]).sum::<f32>() + gaps;
+    let free = inner - used;
+    let total_grow: f32 = grows.iter().sum();
+    if free > 0.0 && total_grow > 0.0 {
+        for i in 0..n {
+            bases[i] += free * grows[i] / total_grow;
+        }
+        return;
+    }
+    if free < 0.0 {
+        let total_shrink: f32 = shrinks.iter().sum();
+        if total_shrink > 0.0 {
+            let scaled: Vec<f32> = (0..n).map(|i| bases[i] * shrinks[i]).collect();
+            let sum: f32 = scaled.iter().sum();
+            if sum > 0.0 {
+                for i in 0..n {
+                    bases[i] = (bases[i] + free * scaled[i] / sum).max(0.0);
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1983,6 +2418,7 @@ mod tests {
             BoxKind::Block(s)
             | BoxKind::Inline(s)
             | BoxKind::InlineBlock(s)
+            | BoxKind::Flex(s)
             | BoxKind::Table(s)
             | BoxKind::TableRow(s)
             | BoxKind::TableCell(s) => s.node.name().unwrap_or("#text"),
@@ -3239,5 +3675,189 @@ mod tests {
         let p = &root.abs[0];
         assert!(eq(p.dims.content.x, 3.0));
         assert!(eq(p.dims.content.y, 2.0));
+    }
+
+    #[test]
+    fn flex_row_items() {
+        let dom = parse_html(
+            "<html><div style=\"display: flex\"><p>a</p><p>b</p></div></html>",
+        );
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let div = find(&root, "div");
+        let w = font::width("a", 16.0);
+        let p1 = &div.children[0];
+        let p2 = &div.children[1];
+        assert!(eq(p1.dims.content.x, 0.0));
+        assert!(eq(p1.dims.content.width, w));
+        assert!(eq(p2.dims.content.x, w));
+        assert!(eq(div.dims.content.height, 19.2));
+    }
+
+    #[test]
+    fn flex_grow_fills_free_space() {
+        let dom = parse_html(
+            "<html><div style=\"display: flex\"><p style=\"flex: 1\">a</p><p style=\"flex: 1\">b</p></div></html>",
+        );
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let div = find(&root, "div");
+        assert!(eq(div.children[0].dims.content.width, 100.0));
+        assert!(eq(div.children[1].dims.content.x, 100.0));
+    }
+
+    #[test]
+    fn flex_justify_center() {
+        let dom = parse_html(
+            "<html><div style=\"display: flex; justify-content: center\"><p style=\"width: 50px\">a</p></div></html>",
+        );
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let div = find(&root, "div");
+        assert!(eq(div.children[0].dims.content.x, 75.0));
+    }
+
+    #[test]
+    fn flex_justify_between() {
+        let dom = parse_html(
+            "<html><div style=\"display: flex; justify-content: space-between\"><p style=\"width: 50px\">a</p><p style=\"width: 50px\">b</p></div></html>",
+        );
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let div = find(&root, "div");
+        assert!(eq(div.children[0].dims.content.x, 0.0));
+        assert!(eq(div.children[1].dims.content.x, 150.0));
+    }
+
+    #[test]
+    fn flex_justify_end() {
+        let dom = parse_html(
+            "<html><div style=\"display: flex; justify-content: flex-end\"><p style=\"width: 50px\">a</p></div></html>",
+        );
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let div = find(&root, "div");
+        assert!(eq(div.children[0].dims.content.x, 150.0));
+    }
+
+    #[test]
+    fn flex_column_stacks() {
+        let dom = parse_html(
+            "<html><div style=\"display: flex; flex-direction: column\"><p>a</p><p>b</p></div></html>",
+        );
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let div = find(&root, "div");
+        assert!(eq(div.children[0].dims.content.y, 0.0));
+        assert!(eq(div.children[0].dims.content.width, 200.0));
+        assert!(eq(div.children[1].dims.content.y, 19.2));
+        assert!(eq(div.dims.content.height, 38.4));
+    }
+
+    #[test]
+    fn flex_column_grow() {
+        let dom = parse_html(
+            "<html><div style=\"display: flex; flex-direction: column; height: 100px\"><p>a</p><p style=\"flex: 1\">b</p></div></html>",
+        );
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let div = find(&root, "div");
+        assert!(eq(div.children[1].dims.content.y, 19.2));
+        assert!(eq(div.children[1].dims.content.height, 80.8));
+        assert!(eq(div.dims.content.height, 100.0));
+    }
+
+    #[test]
+    fn flex_gap_separates_items() {
+        let dom = parse_html(
+            "<html><div style=\"display: flex; gap: 10px\"><p>a</p><p>b</p></div></html>",
+        );
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let div = find(&root, "div");
+        assert!(eq(div.children[1].dims.content.x, font::width("a", 16.0) + 10.0));
+    }
+
+    #[test]
+    fn flex_align_items_center() {
+        let dom = parse_html(
+            "<html><div style=\"display: flex; height: 60px; align-items: center\"><p>a</p></div></html>",
+        );
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let div = find(&root, "div");
+        assert!(eq(div.children[0].dims.content.y, 20.4));
+    }
+
+    #[test]
+    fn flex_align_items_stretch() {
+        let dom = parse_html(
+            "<html><div style=\"display: flex; height: 60px\"><p>a</p></div></html>",
+        );
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let div = find(&root, "div");
+        assert!(eq(div.children[0].dims.content.height, 60.0));
+    }
+
+    #[test]
+    fn flex_align_self_end() {
+        let dom = parse_html(
+            "<html><div style=\"display: flex; height: 60px; align-items: flex-start\"><p style=\"align-self: flex-end\">a</p></div></html>",
+        );
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let div = find(&root, "div");
+        assert!(eq(div.children[0].dims.content.y, 40.8));
+    }
+
+    #[test]
+    fn flex_shrinks_overflow() {
+        let dom = parse_html(
+            "<html><div style=\"display: flex\"><p style=\"width: 150px\">a</p><p style=\"width: 150px\">b</p></div></html>",
+        );
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let div = find(&root, "div");
+        assert!(eq(div.children[0].dims.content.width, 100.0));
+        assert!(eq(div.children[1].dims.content.x, 100.0));
+    }
+
+    #[test]
+    fn flex_shrink_proportional() {
+        let dom = parse_html(
+            "<html><div style=\"display: flex\"><p style=\"width: 150px\">a</p><p style=\"width: 150px; flex-shrink: 3\">b</p></div></html>",
+        );
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let div = find(&root, "div");
+        assert!(eq(div.children[0].dims.content.width, 125.0));
+        assert!(eq(div.children[1].dims.content.width, 75.0));
+    }
+
+    #[test]
+    fn flex_basis_length() {
+        let dom = parse_html(
+            "<html><div style=\"display: flex\"><p style=\"flex: 0 0 80px\">a</p><p>b</p></div></html>",
+        );
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let div = find(&root, "div");
+        assert!(eq(div.children[0].dims.content.width, 80.0));
+        assert!(eq(div.children[1].dims.content.x, 80.0));
     }
 }
