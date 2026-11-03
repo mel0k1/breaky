@@ -1,4 +1,5 @@
 use crate::dom::{Node, NodeKind};
+use crate::entities;
 
 const VOID: [&str; 14] = [
     "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source",
@@ -142,7 +143,7 @@ fn parse_attrs(s: &str) -> Vec<(String, String)> {
                 }
             };
             if !key.is_empty() {
-                out.push((key, val));
+                out.push((key, entities::decode(&val)));
             }
             rest = tail.trim();
         } else {
@@ -166,6 +167,7 @@ fn attach_top(stack: &mut Vec<Node>, doc: &mut Node, node: Node) {
 fn flush(stack: &mut Vec<Node>, doc: &mut Node, text: &mut String) {
     let t = std::mem::take(text);
     if !t.is_empty() {
+        let t = entities::decode(&t);
         attach_top(stack, doc, Node::new(NodeKind::Text(t)));
     }
 }
@@ -262,5 +264,46 @@ mod tests {
         };
         assert_eq!(attrs[0], ("charset".into(), "utf-8".into()));
         assert_eq!(head.children[1].children[0], Node::new(NodeKind::Text("T".into())));
+    }
+
+    #[test]
+    fn entities_in_text() {
+        let doc = parse("<p>a &amp; b &lt;c&gt; &#65;&#x42; &copy;</p>");
+        let p = find_el(&doc, "p");
+        assert_eq!(
+            p.children[0],
+            Node::new(NodeKind::Text("a & b <c> AB \u{a9}".into()))
+        );
+    }
+
+    #[test]
+    fn entities_in_attrs() {
+        let doc = parse("<a title=\"x&quot;y\" data-n=\"a&amp;b\">t</a>");
+        let a = find_el(&doc, "a");
+        let NodeKind::Element { attrs, .. } = &a.kind else {
+            panic!()
+        };
+        assert_eq!(attrs[0], ("title".into(), "x\"y".into()));
+        assert_eq!(attrs[1], ("data-n".into(), "a&b".into()));
+    }
+
+    #[test]
+    fn entities_stay_raw_in_script() {
+        let doc = parse("<body><script>if (a &lt; b) {}</script></body>");
+        let body = find_el(&doc, "body");
+        assert_eq!(
+            body.children[0].children[0],
+            Node::new(NodeKind::Text("if (a &lt; b) {}".into()))
+        );
+    }
+
+    #[test]
+    fn unknown_entity_literal() {
+        let doc = parse("<p>5 &lt 6 &amp; &#;</p>");
+        let p = find_el(&doc, "p");
+        assert_eq!(
+            p.children[0],
+            Node::new(NodeKind::Text("5 &lt 6 & &#;".into()))
+        );
     }
 }
