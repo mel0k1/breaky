@@ -29,6 +29,8 @@ Workspace of small crates:
 - [x] DOM builder
 - [x] CSS parser
 - [x] Style engine
+- [x] Inheritance
+- [x] Typed values
 - [ ] Layout
 - [ ] Rendering
 - [ ] Networking
