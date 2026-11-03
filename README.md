@@ -9,16 +9,16 @@ A browser engine in Rust. Educational, experimental.
 ## Usage
 
 ```sh
-cargo run -- page.html
+cargo run -- page.html [style.css]
 ```
 
-Prints the DOM tree of the page.
+Prints the DOM tree of the page and parsed CSS rules.
 
 ## Roadmap
 
 - [x] HTML tokenizer
 - [x] DOM builder
-- [ ] CSS parser
+- [x] CSS parser
 - [ ] Style engine
 - [ ] Layout
 - [ ] Rendering
