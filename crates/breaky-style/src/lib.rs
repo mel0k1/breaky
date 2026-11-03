@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use css::{Color, Rule, Selector, SimpleSelector, Stylesheet, Unit, Value};
+use css::{Rule, Selector, SimpleSelector, Stylesheet, Value};
 use html::{Node, NodeKind};
 
 const INHERITED: [&str; 9] = [
@@ -132,6 +132,8 @@ fn attr<'a>(node: &'a Node, name: &str) -> Option<&'a str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use css::Color;
+    use css::Unit;
     use css::parse as parse_css;
     use html::parse as parse_html;
 

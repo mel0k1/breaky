@@ -1,0 +1,15 @@
+[package]
+name = "breaky-layout"
+version = "0.1.0"
+edition = "2021"
+description = "Layout engine for Breaky"
+license = "MIT"
+
+[lib]
+name = "layout"
+path = "src/lib.rs"
+
+[dependencies]
+breaky-html = { path = "../breaky-html" }
+breaky-css = { path = "../breaky-css" }
+breaky-style = { path = "../breaky-style" }

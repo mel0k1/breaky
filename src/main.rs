@@ -14,7 +14,17 @@ fn main() {
     html::print_tree(&dom, 0);
     if let Some(css) = args.get(2) {
         let sheet = css::parse(&fs::read_to_string(css).unwrap_or_else(fail));
-        print_styled(&build(&dom, &sheet), 0);
+        let styled = build(&dom, &sheet);
+        println!();
+        print_styled(&styled, 0);
+        let viewport = args
+            .get(3)
+            .and_then(|s| s.parse::<f32>().ok())
+            .unwrap_or(800.0);
+        if let Some(tree) = layout::layout(&styled, viewport) {
+            println!();
+            layout::print_tree(&tree, 0);
+        }
     }
 }
 
@@ -51,6 +61,6 @@ fn fail<T>(e: std::io::Error) -> T {
 }
 
 fn usage() -> ! {
-    eprintln!("usage: breaky <file> [style.css]");
+    eprintln!("usage: breaky <file> [style.css] [width]");
     exit(2);
 }
