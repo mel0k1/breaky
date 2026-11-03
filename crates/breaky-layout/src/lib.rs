@@ -147,6 +147,7 @@ enum Display {
     TableRow,
     TableCell,
     RowGroup,
+    TableCaption,
     None,
 }
 
@@ -266,7 +267,9 @@ fn build_node<'a>(
                 BoxKind::Inline(styled)
             } else {
                 match display(styled) {
-                    Display::Block | Display::ListItem => BoxKind::Block(styled),
+                    Display::Block | Display::ListItem | Display::TableCaption => {
+                        BoxKind::Block(styled)
+                    }
                     Display::InlineBlock => BoxKind::InlineBlock(styled),
                     Display::TableCell => BoxKind::TableCell(styled),
                     _ => BoxKind::Inline(styled),
@@ -580,6 +583,13 @@ fn list_marker<'a>(styled: &'a StyledNode<'a>, anc: &[&'a StyledNode<'a>]) -> Op
     Some(Box::leak(format!("{}.", start + idx as i64).into_boxed_str()))
 }
 
+fn caption_bottom(b: &LayoutBox) -> bool {
+    b.style()
+        .and_then(|s| s.computed.get("caption-side"))
+        .and_then(|v| v.first())
+        .map_or(false, |v| matches!(v, Value::Keyword(k) if k == "bottom"))
+}
+
 fn list_inside(styled: &StyledNode) -> bool {
     matches!(
         styled
@@ -597,6 +607,8 @@ fn build_table<'a>(
 ) -> (Vec<LayoutBox<'a>>, Vec<LayoutBox<'a>>) {
     let mut rows: Vec<LayoutBox<'a>> = Vec::new();
     let mut cells: Vec<LayoutBox<'a>> = Vec::new();
+    let mut top: Vec<LayoutBox<'a>> = Vec::new();
+    let mut bottom: Vec<LayoutBox<'a>> = Vec::new();
     let mut sink: Vec<LayoutBox<'a>> = Vec::new();
     let mut sources: Vec<&StyledNode<'a>> = Vec::new();
     for c in &styled.children {
@@ -611,7 +623,15 @@ fn build_table<'a>(
     }
     for src in sources {
         let d = display(src);
-        if d == Display::TableRow {
+        if d == Display::TableCaption {
+            let (mut cf, cs) = build_node(src, anc, root_out, false);
+            sink.extend(cs);
+            if cf.iter().any(caption_bottom) {
+                bottom.append(&mut cf);
+            } else {
+                top.append(&mut cf);
+            }
+        } else if d == Display::TableRow {
             flush_cells(&mut rows, &mut cells);
             let (row, cs) = build_row(src, anc, root_out);
             sink.extend(cs);
@@ -632,13 +652,15 @@ fn build_table<'a>(
         }
     }
     flush_cells(&mut rows, &mut cells);
+    top.extend(rows);
+    top.extend(bottom);
     let b = LayoutBox {
         dims: Dimensions::default(),
         kind: BoxKind::Table(styled),
         text: None,
         marker: None,
         abs: Vec::new(),
-        children: rows,
+        children: top,
         ws: ws_of(styled),
         align: Align::Left,
         strut: 0.0,
@@ -753,6 +775,7 @@ fn display(styled: &StyledNode) -> Display {
             "table-row" => Display::TableRow,
             "table-cell" => Display::TableCell,
             "table-row-group" | "table-header-group" | "table-footer-group" => Display::RowGroup,
+            "table-caption" => Display::TableCaption,
             "none" => Display::None,
             _ => Display::Block,
         };
@@ -774,6 +797,7 @@ fn default_display(name: &str) -> Display {
         "tr" => Display::TableRow,
         "td" | "th" => Display::TableCell,
         "thead" | "tbody" | "tfoot" => Display::RowGroup,
+        "caption" => Display::TableCaption,
         _ => Display::Block,
     }
 }
@@ -2719,6 +2743,59 @@ mod tests {
         let b = find(p, "b");
         assert!(matches!(b.kind, BoxKind::TableCell(_)));
         assert!(eq(b.dims.content.width, font::width("x", 16.0)));
+    }
+
+    #[test]
+    fn table_caption_above_rows() {
+        let dom = parse_html(
+            "<html><table><caption>hi</caption><tr><td>a</td></tr></table></html>",
+        );
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let table = find(&root, "table");
+        let cap = &table.children[0];
+        assert_eq!(tag(cap), "caption");
+        let w = font::width("a", 16.0);
+        assert!(eq(cap.dims.content.y, 0.0));
+        assert!(eq(cap.dims.content.width, w));
+        assert!(eq(cap.dims.content.height, 19.2));
+        let row = &table.children[1];
+        assert!(eq(row.dims.content.y, 19.2));
+        assert!(eq(table.dims.content.height, 38.4));
+    }
+
+    #[test]
+    fn table_caption_side_bottom() {
+        let dom = parse_html(
+            "<html><table><caption style=\"caption-side: bottom\">hi</caption><tr><td>a</td></tr></table></html>",
+        );
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let table = find(&root, "table");
+        let row = &table.children[0];
+        assert!(eq(row.dims.content.y, 0.0));
+        let cap = &table.children[1];
+        assert!(eq(cap.dims.content.y, 19.2));
+        assert!(eq(table.dims.content.height, 38.4));
+    }
+
+    #[test]
+    fn table_caption_display_keyword() {
+        let dom = parse_html(
+            "<html><div style=\"display: table\"><p style=\"display: table-caption\">c</p><p style=\"display: table-row\"><b style=\"display: table-cell\">x</b></p></div></html>",
+        );
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let div = find(&root, "div");
+        let cap = &div.children[0];
+        assert_eq!(tag(cap), "p");
+        assert!(eq(cap.dims.content.height, 19.2));
+        let row = &div.children[1];
+        assert!(matches!(row.kind, BoxKind::TableRow(_)));
+        assert!(eq(row.dims.content.y, 19.2));
     }
 
     #[test]
