@@ -39,7 +39,7 @@ Workspace of small crates:
 - [x] Percentages
 - [x] Floats
 - [x] Rendering
-- [ ] Text and fonts
+- [x] Text and fonts
 - [ ] Networking
 
 ## License
