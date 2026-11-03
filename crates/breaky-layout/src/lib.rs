@@ -75,6 +75,7 @@ pub struct LayoutBox<'a> {
     pub children: Vec<LayoutBox<'a>>,
     pub abs: Vec<LayoutBox<'a>>,
     ws: WS,
+    align: Align,
     strut: f32,
 }
 
@@ -84,6 +85,23 @@ enum WS {
     NoWrap,
     Pre,
     PreWrap,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Align {
+    Left,
+    Center,
+    Right,
+    Justify,
+}
+
+struct Item {
+    idx: usize,
+    w: f32,
+    above: f32,
+    below: f32,
+    space: bool,
+    atomic: bool,
 }
 
 struct Flow {
@@ -177,6 +195,7 @@ fn build_root<'a>(styled: &'a StyledNode<'a>) -> Option<LayoutBox<'a>> {
             abs: Vec::new(),
             children: flow,
             ws: WS::Normal,
+            align: Align::Left,
             strut: 0.0,
         },
     };
@@ -237,6 +256,7 @@ fn build_node<'a>(
                     abs: my_abs,
                     children: group_blocks(flow, Some(styled)),
                     ws: ws_of(styled),
+                    align: Align::Left,
                     strut: 0.0,
                 };
                 if pos == "fixed" || !positioned_in(anc) {
@@ -258,6 +278,7 @@ fn build_node<'a>(
                     abs: my_abs,
                     children,
                     ws: ws_of(styled),
+                    align: Align::Left,
                     strut: 0.0,
                 };
                 (vec![b], sink)
@@ -354,6 +375,7 @@ fn word_box<'a>(styled: &'a StyledNode<'a>, text: &'a str, ws: WS) -> LayoutBox<
         abs: Vec::new(),
         children: Vec::new(),
         ws,
+        align: Align::Left,
         strut: 0.0,
     }
 }
@@ -389,6 +411,18 @@ fn ws_of(styled: &StyledNode) -> WS {
             _ => WS::Normal,
         },
         _ => WS::Normal,
+    }
+}
+
+fn align_of(styled: &StyledNode) -> Align {
+    match styled.computed.get("text-align").and_then(|v| v.first()) {
+        Some(Value::Keyword(k)) => match k.as_str() {
+            "center" => Align::Center,
+            "right" => Align::Right,
+            "justify" => Align::Justify,
+            _ => Align::Left,
+        },
+        _ => Align::Left,
     }
 }
 
@@ -453,6 +487,7 @@ fn flush_run<'a>(
             abs: Vec::new(),
             children: std::mem::take(run),
             ws: styled.map(ws_of).unwrap_or(WS::Normal),
+            align: styled.map(align_of).unwrap_or(Align::Left),
             strut: styled.map(strut_of).unwrap_or(0.0),
         });
     } else {
@@ -641,6 +676,28 @@ impl<'a> LayoutBox<'a> {
         self.text == Some(" ") && matches!(self.ws, WS::Normal | WS::NoWrap)
     }
 
+    fn extent(&self, parent_font: f32, base: f32) -> (f32, f32, bool) {
+        let font = self.font(parent_font);
+        let a = font::asc(font);
+        let d = font::desc(font);
+        let lh = self.line_height(font);
+        let hl = (lh - a - d) / 2.0;
+        let m = self.edges(Family::Margin, font, base);
+        let b = self.edges(Family::Border, font, base);
+        let p = self.edges(Family::Padding, font, base);
+        if matches!(self.kind, BoxKind::InlineBlock(_)) {
+            let above = m.top + b.top + p.top + hl + a;
+            let h = self.measure_h(parent_font, base);
+            (above, h - above, true)
+        } else {
+            (
+                m.top + b.top + p.top + hl + a,
+                m.bottom + b.bottom + p.bottom + d + hl,
+                false,
+            )
+        }
+    }
+
     fn wraps(&self) -> bool {
         match self.text {
             Some(_) => matches!(self.ws, WS::Normal | WS::PreWrap),
@@ -765,87 +822,143 @@ impl<'a> LayoutBox<'a> {
         let full_l = self.dims.content.x;
         let full_r = full_l + self.dims.content.width;
         let top = self.dims.content.y;
-        let mut cx = full_l;
+        let align = self.align;
         let mut cy = top;
-        let mut line = 0.0f32;
-        let mut line_start = true;
-        let mut prev_space = false;
-        for child in &mut self.children {
-            if child.text == Some("\n") {
-                cy += if line == 0.0 { self.strut } else { line };
-                line = 0.0;
-                cx = band(floats, cy, 0.0, full_l, full_r).0;
-                line_start = true;
-                prev_space = false;
+        let mut idx = 0;
+        while idx < self.children.len() {
+            let (end, items, wrapped) =
+                self.collect(idx, floats, &mut cy, full_l, full_r, font);
+            if items.is_empty() {
+                idx = end;
                 continue;
+            }
+            let mut max_a = f32::NEG_INFINITY;
+            let mut max_b = f32::NEG_INFINITY;
+            for it in &items {
+                max_a = max_a.max(it.above);
+                max_b = max_b.max(it.below);
+            }
+            let line_h = max_a + max_b;
+            let (l, r) = band(floats, cy, line_h, full_l, full_r);
+            let width: f32 = items.iter().map(|it| it.w).sum();
+            let offset = match align {
+                Align::Left | Align::Justify => 0.0,
+                Align::Center => ((r - l) - width) / 2.0,
+                Align::Right => (r - l) - width,
+            };
+            let spaces = items.iter().filter(|it| it.space).count();
+            let gap = if align == Align::Justify && wrapped && spaces > 0 {
+                ((r - l) - width).max(0.0) / spaces as f32
+            } else {
+                0.0
+            };
+            let baseline = cy + max_a;
+            let mut pen = l + offset;
+            let mut first = true;
+            let mut restart_idx: Option<usize> = None;
+            for it in &items {
+                let i = it.idx;
+                if it.atomic {
+                    let avail = (r - pen).max(0.0);
+                    self.children[i].layout_atomic(pen, baseline - it.above, avail, floats, font);
+                    let mb = self.children[i].dims.margin_box();
+                    if !first && mb.x + mb.width > r {
+                        cy += line_h;
+                        let (l2, r2) =
+                            band(floats, cy, it.above + it.below, full_l, full_r);
+                        self.children[i].layout_atomic(
+                            l2,
+                            cy,
+                            (r2 - l2).max(0.0),
+                            floats,
+                            font,
+                        );
+                        restart_idx = Some(i);
+                        break;
+                    }
+                    pen = mb.x + mb.width;
+                } else {
+                    let f = Flow {
+                        x: pen,
+                        y: baseline - it.above,
+                        width: (r - pen).max(0.0),
+                        height: 0.0,
+                    };
+                    self.children[i].place(&f, floats, font);
+                    pen += it.w + if it.space { gap } else { 0.0 };
+                }
+                self.children[i].apply_relative(font, full_r - full_l);
+                first = false;
+            }
+            if let Some(i) = restart_idx {
+                idx = i;
+            } else {
+                cy += line_h;
+                idx = end;
+            }
+        }
+        self.dims.content.height = cy - top;
+    }
+
+    fn collect(
+        &self,
+        start: usize,
+        floats: &[(Side, Rect)],
+        cy: &mut f32,
+        full_l: f32,
+        full_r: f32,
+        font: f32,
+    ) -> (usize, Vec<Item>, bool) {
+        let mut items: Vec<Item> = Vec::new();
+        let mut width = 0.0;
+        let mut est = 0.0f32;
+        let mut prev_space = false;
+        let mut wrapped = false;
+        let mut j = start;
+        while j < self.children.len() {
+            let child = &self.children[j];
+            if child.text == Some("\n") {
+                j += 1;
+                if items.is_empty() {
+                    *cy += self.strut;
+                    continue;
+                }
+                break;
             }
             let space = child.is_space();
-            if space && (line_start || prev_space) {
-                continue;
-            }
-            if matches!(child.kind, BoxKind::InlineBlock(_)) {
-                let (l, r) = band(floats, cy, 0.0, full_l, full_r);
-                let avail = (r - l).max(0.0);
-                let x = if line_start { l } else { cx };
-                child.layout_atomic(x, cy, avail, floats, font);
-                let mut mb = child.dims.margin_box();
-                if !line_start && mb.x + mb.width > full_r {
-                    cy += line;
-                    line = 0.0;
-                    let (l2, r2) = band(floats, cy, 0.0, full_l, full_r);
-                    child.layout_atomic(l2, cy, (r2 - l2).max(0.0), floats, font);
-                    mb = child.dims.margin_box();
-                }
-                cx = mb.x + mb.width;
-                line = line.max(mb.height);
-                line_start = false;
-                prev_space = false;
-                child.apply_relative(font, full_r - full_l);
+            if space && (items.is_empty() || prev_space) {
+                j += 1;
                 continue;
             }
             let mw = child.measure_w(font, full_r - full_l);
-            let mh = child.measure_h(font, full_r - full_l);
-            let (l, r) = band(floats, cy, mh.max(line), full_l, full_r);
-            if line_start {
-                cx = l;
+            let (above, below, atomic) = child.extent(font, full_r - full_l);
+            let band_h = est.max(above + below);
+            let (l, r) = band(floats, *cy, band_h, full_l, full_r);
+            if items.is_empty() {
                 if mw > r - l {
-                    cy = floats
+                    *cy = floats
                         .iter()
                         .map(|(_, rc)| rc.y + rc.height)
-                        .fold(cy, f32::max);
-                    cx = band(floats, cy, mh, full_l, full_r).0;
+                        .fold(*cy, f32::max);
                 }
-            } else if child.wraps() && cx + mw > r {
-                cy += line;
-                line = 0.0;
-                let b2 = band(floats, cy, mh, full_l, full_r);
-                cx = b2.0;
-                if mw > b2.1 - b2.0 {
-                    cy = floats
-                        .iter()
-                        .map(|(_, rc)| rc.y + rc.height)
-                        .fold(cy, f32::max);
-                    cx = band(floats, cy, mh, full_l, full_r).0;
-                }
-                line_start = true;
-                if space {
-                    continue;
-                }
+            } else if child.wraps() && width + mw > r - l {
+                wrapped = true;
+                break;
             }
-            let f = Flow {
-                x: cx,
-                y: cy,
-                width: r - cx,
-                height: 0.0,
-            };
-            child.place(&f, floats, font);
-            cx += mw;
-            line = line.max(mh);
-            line_start = false;
+            items.push(Item {
+                idx: j,
+                w: mw,
+                above,
+                below,
+                space,
+                atomic,
+            });
+            width += mw;
             prev_space = space;
-            child.apply_relative(font, full_r - full_l);
+            est = band_h;
+            j += 1;
         }
-        self.dims.content.height = cy + line - top;
+        (j, items, wrapped)
     }
 
     fn place_inline(
@@ -1745,6 +1858,67 @@ mod tests {
             text.dims.content.width,
             font::width("a", 16.0) + 4.0 * font::width(" ", 16.0) + font::width("b", 16.0)
         ));
+    }
+
+    #[test]
+    fn text_align_center() {
+        let dom = parse_html("<html><p>hi</p></html>");
+        let sheet = parse_css("p { width: 100px; text-align: center }");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let p = find(&root, "p");
+        let text = &p.children[0].children[0];
+        let want = (100.0 - font::width("hi", 16.0)) / 2.0;
+        assert!(eq(text.dims.content.x, want));
+    }
+
+    #[test]
+    fn text_align_right() {
+        let dom = parse_html("<html><p>hi</p></html>");
+        let sheet = parse_css("p { width: 100px; text-align: right }");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let p = find(&root, "p");
+        let text = &p.children[0].children[0];
+        assert!(eq(text.dims.content.x, 100.0 - font::width("hi", 16.0)));
+    }
+
+    #[test]
+    fn text_align_inherits() {
+        let dom = parse_html("<html><div><b>hi</b></div></html>");
+        let sheet = parse_css("div { width: 80px; text-align: center }");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let div = find(&root, "div");
+        let b = find(&div.children[0], "b");
+        let want = (80.0 - font::width("hi", 16.0)) / 2.0;
+        assert!(eq(b.dims.content.x, want));
+    }
+
+    #[test]
+    fn text_align_justify_spreads_spaces() {
+        let dom = parse_html("<html><p>aa bb cc</p></html>");
+        let sheet = parse_css("p { width: 50px; text-align: justify }");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let p = find(&root, "p");
+        let anon = &p.children[0];
+        let bb = &anon.children[2];
+        assert!(eq(bb.dims.content.x, font::width("aa", 16.0) + 10.0));
+        let cc = &anon.children[4];
+        assert!(eq(cc.dims.content.x, 0.0));
+        assert!(eq(cc.dims.content.y, 19.2));
+    }
+
+    #[test]
+    fn text_align_justify_skips_last_line() {
+        let dom = parse_html("<html><p>aa bb</p></html>");
+        let sheet = parse_css("p { width: 200px; text-align: justify }");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let p = find(&root, "p");
+        let bb = &p.children[0].children[2];
+        assert!(eq(bb.dims.content.x, font::width("aa", 16.0) + 6.0));
     }
 
     #[test]
