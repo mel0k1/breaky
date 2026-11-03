@@ -258,6 +258,12 @@ fn paint_img(canvas: &mut Canvas, b: &LayoutBox, imgs: &img::Store) {
     if c.width <= 0.0 || c.height <= 0.0 {
         return;
     }
+    let nearest = matches!(
+        computed(b)
+            .and_then(|m| m.get("image-rendering"))
+            .and_then(|v| v.first()),
+        Some(Value::Keyword(k)) if k == "pixelated"
+    );
     canvas.image_scaled(
         c.x,
         c.y,
@@ -270,7 +276,7 @@ fn paint_img(canvas: &mut Canvas, b: &LayoutBox, imgs: &img::Store) {
             width: f32::INFINITY,
             height: f32::INFINITY,
         },
-        true,
+        !nearest,
     );
 }
 
@@ -1122,6 +1128,55 @@ mod tests {
         assert!(mid[0] > 100 && mid[0] < 255 && mid[2] > 0 && mid[2] < 100);
         assert_eq!(canvas.pixel(0, 1), [255, 0, 0]);
         assert_eq!(canvas.pixel(4, 0), [255, 255, 255]);
+    }
+
+    #[test]
+    fn img_paints_nearest_when_pixelated() {
+        let dom = parse_html(
+            "<html><body><img src=\"q.png\" width=\"4\" height=\"2\"></body></html>",
+        );
+        let sheet = parse_css("img { image-rendering: pixelated }");
+        let styled = style_build(&dom, &sheet);
+        let mut imgs = img::Store::new();
+        imgs.insert(
+            "q.png".into(),
+            img::Image {
+                width: 2,
+                height: 1,
+                data: vec![255, 0, 0, 255, 0, 0, 255, 255],
+            },
+        );
+        let tree = layout_with(&styled, 50.0, &imgs).unwrap();
+        let canvas = paint_with(&tree, 50.0, &imgs);
+        assert_eq!(canvas.pixel(0, 0), [255, 0, 0]);
+        assert_eq!(canvas.pixel(1, 0), [255, 0, 0]);
+        assert_eq!(canvas.pixel(2, 0), [0, 0, 255]);
+        assert_eq!(canvas.pixel(3, 0), [0, 0, 255]);
+    }
+
+    #[test]
+    fn img_bilinear_alpha_no_bleed() {
+        let dom = parse_html(
+            "<html><body><img src=\"q.png\" width=\"4\" height=\"4\"></body></html>",
+        );
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let mut imgs = img::Store::new();
+        imgs.insert(
+            "q.png".into(),
+            img::Image {
+                width: 2,
+                height: 2,
+                data: vec![
+                    255, 0, 0, 255, 0, 0, 0, 0, 0, 0, 255, 255, 0, 0, 0, 0,
+                ],
+            },
+        );
+        let tree = layout_with(&styled, 50.0, &imgs).unwrap();
+        let canvas = paint_with(&tree, 50.0, &imgs);
+        let p = canvas.pixel(1, 0);
+        assert_eq!(p[0], 255);
+        assert!(p[1] > 0 && p[1] < 128, "green must come only from coverage");
     }
 
     #[test]
