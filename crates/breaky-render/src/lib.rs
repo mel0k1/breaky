@@ -237,6 +237,17 @@ fn intersect(a: Rect, b: Rect) -> Rect {
     }
 }
 
+fn z_index(b: &LayoutBox) -> i32 {
+    match computed(b)
+        .and_then(|m| m.get("z-index"))
+        .and_then(|v| v.first())
+    {
+        Some(Value::Length(n, _)) => *n as i32,
+        Some(Value::Keyword(k)) => k.parse::<i32>().unwrap_or(0),
+        _ => 0,
+    }
+}
+
 fn sample_nearest(img: &Image, sx: f32, sy: f32) -> Color {
     let x = sx.round().clamp(0.0, img.width as f32 - 1.0) as u32;
     let y = sy.round().clamp(0.0, img.height as f32 - 1.0) as u32;
@@ -336,6 +347,7 @@ fn paint_box(canvas: &mut Canvas, b: &LayoutBox, imgs: &img::Store) {
             None => r,
         });
     }
+    paint_abs_group(canvas, b, imgs, true);
     paint_text(canvas, b);
     paint_marker(canvas, b, imgs);
     for child in &b.children {
@@ -348,10 +360,18 @@ fn paint_box(canvas: &mut Canvas, b: &LayoutBox, imgs: &img::Store) {
             paint_box(canvas, child, imgs);
         }
     }
-    for child in &b.abs {
-        paint_box(canvas, child, imgs);
-    }
+    paint_abs_group(canvas, b, imgs, false);
     canvas.clip = saved;
+}
+
+fn paint_abs_group(canvas: &mut Canvas, b: &LayoutBox, imgs: &img::Store, below: bool) {
+    let mut idx: Vec<usize> = (0..b.abs.len())
+        .filter(|&i| (z_index(&b.abs[i]) < 0) == below)
+        .collect();
+    idx.sort_by_key(|&i| z_index(&b.abs[i]));
+    for i in idx {
+        paint_box(canvas, &b.abs[i], imgs);
+    }
 }
 
 fn paint_text(canvas: &mut Canvas, b: &LayoutBox) {
@@ -1606,6 +1626,63 @@ mod tests {
         let tree = layout(&styled, 100.0).unwrap();
         let canvas = paint(&tree, 100.0);
         assert_eq!(canvas.height, 10);
+    }
+
+    #[test]
+    fn z_index_negative_behind_content() {
+        let dom = parse_html(
+            "<html><body><div class=\"p\"><div class=\"a\"></div><div class=\"b\"></div></div></body></html>",
+        );
+        let sheet = parse_css(
+            ".p { position: relative; width: 40px; height: 20px; background-color: #0000ff } .a { position: absolute; z-index: -1; width: 40px; height: 20px; background-color: #ff0000 } .b { width: 40px; height: 20px; background-color: #00ff00 }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let tree = layout(&styled, 100.0).unwrap();
+        let canvas = paint(&tree, 100.0);
+        assert_eq!(canvas.pixel(20, 10), [0, 255, 0]);
+        let sheet = parse_css(
+            ".p { position: relative; width: 40px; height: 20px; background-color: #0000ff } .a { position: absolute; width: 40px; height: 20px; background-color: #ff0000 } .b { width: 40px; height: 20px; background-color: #00ff00 }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let tree = layout(&styled, 100.0).unwrap();
+        let canvas = paint(&tree, 100.0);
+        assert_eq!(canvas.pixel(20, 10), [255, 0, 0]);
+    }
+
+    #[test]
+    fn z_index_orders_abs_siblings() {
+        let dom = parse_html(
+            "<html><body><div class=\"p\"><div class=\"a\"></div><div class=\"b\"></div></div></body></html>",
+        );
+        let sheet = parse_css(
+            ".p { position: relative; width: 40px; height: 20px } .a { position: absolute; z-index: 1; width: 40px; height: 20px; background-color: #ffff00 } .b { position: absolute; z-index: 2; width: 20px; height: 20px; background-color: #00ffff }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let tree = layout(&styled, 100.0).unwrap();
+        let canvas = paint(&tree, 100.0);
+        assert_eq!(canvas.pixel(10, 10), [0, 255, 255]);
+        assert_eq!(canvas.pixel(30, 10), [255, 255, 0]);
+        let sheet = parse_css(
+            ".p { position: relative; width: 40px; height: 20px } .a { position: absolute; z-index: 2; width: 40px; height: 20px; background-color: #ffff00 } .b { position: absolute; z-index: 1; width: 20px; height: 20px; background-color: #00ffff }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let tree = layout(&styled, 100.0).unwrap();
+        let canvas = paint(&tree, 100.0);
+        assert_eq!(canvas.pixel(10, 10), [255, 255, 0]);
+    }
+
+    #[test]
+    fn z_index_auto_keeps_tree_order() {
+        let dom = parse_html(
+            "<html><body><div class=\"p\"><div class=\"a\"></div><div class=\"b\"></div></div></body></html>",
+        );
+        let sheet = parse_css(
+            ".p { position: relative; width: 40px; height: 20px } .a { position: absolute; width: 40px; height: 20px; background-color: #ffff00 } .b { position: absolute; width: 20px; height: 20px; background-color: #00ffff }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let tree = layout(&styled, 100.0).unwrap();
+        let canvas = paint(&tree, 100.0);
+        assert_eq!(canvas.pixel(10, 10), [0, 255, 255]);
     }
 
     fn find_box<'a>(b: &'a LayoutBox<'a>, name: &str) -> Option<&'a LayoutBox<'a>> {
