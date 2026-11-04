@@ -57,23 +57,30 @@ impl Canvas {
     }
 
     pub fn text(&mut self, x: f32, y: f32, s: &str, c: Color, size: f32) {
+        self.text_alpha(x, y, s, c, size, 1.0);
+    }
+
+    pub fn text_alpha(&mut self, x: f32, y: f32, s: &str, c: Color, size: f32, a: f32) {
         let sc = font::scale(size);
         let top = y - font::ASCENT * sc;
+        let sa = a * c.a as f32 / 255.0;
         let mut pen = x;
         for ch in s.chars() {
             let g = font::glyph(ch);
             for (r, row) in g.rows.iter().enumerate() {
                 for col in 0..g.width {
                     if (row >> col) & 1 == 1 {
-                        self.fill(
-                            Rect {
-                                x: pen + col as f32 * sc,
-                                y: top + r as f32 * sc,
-                                width: sc,
-                                height: sc,
-                            },
-                            c,
-                        );
+                        let gx = pen + col as f32 * sc;
+                        let gy = top + r as f32 * sc;
+                        let x0 = gx.floor().max(0.0) as i64;
+                        let y0 = gy.floor().max(0.0) as i64;
+                        let x1 = (gx + sc).ceil().min(self.width as f32) as i64;
+                        let y1 = (gy + sc).ceil().min(self.height as f32) as i64;
+                        for yy in y0..y1 {
+                            for xx in x0..x1 {
+                                self.blend_alpha(xx, yy, c.r, c.g, c.b, sa);
+                            }
+                        }
                     }
                 }
             }
@@ -564,6 +571,64 @@ fn shadows_of(m: &std::collections::HashMap<String, Vec<Value>>) -> Vec<Shadow> 
     out
 }
 
+fn text_shadows_of(
+    m: &std::collections::HashMap<String, Vec<Value>>,
+    fallback: Color,
+) -> Vec<Shadow> {
+    let font = text_metrics(Some(m)).0;
+    let mut out = Vec::new();
+    if let Some(vals) = m.get("text-shadow") {
+        for group in split_groups(vals) {
+            let mut color = None;
+            let mut lens: Vec<f32> = Vec::new();
+            for v in group {
+                match v {
+                    Value::Color(c) => color = Some(*c),
+                    Value::Length(n, Unit::Px) => lens.push(*n),
+                    Value::Length(n, Unit::Em) => lens.push(n * font),
+                    _ => {}
+                }
+            }
+            if lens.len() < 2 {
+                continue;
+            }
+            out.push(Shadow {
+                dx: lens[0],
+                dy: lens[1],
+                blur: lens.get(2).copied().unwrap_or(0.0).max(0.0),
+                spread: 0.0,
+                color: color.unwrap_or(fallback),
+            });
+        }
+    }
+    out
+}
+
+fn paint_text_shadow(canvas: &mut Canvas, x: f32, y: f32, s: &str, size: f32, sh: &Shadow) {
+    let n = if sh.blur > 0.0 {
+        ((sh.blur * sh.blur).ceil() as usize).clamp(2, 24)
+    } else {
+        1
+    };
+    for i in 0..n {
+        let (jx, jy) = if n == 1 {
+            (0.0, 0.0)
+        } else {
+            let r = sh.blur * ((i as f32 + 0.5) / n as f32).sqrt();
+            let th = i as f32 * 2.399963229728653;
+            (r * th.cos(), r * th.sin())
+        };
+        canvas.text_alpha(
+            x + sh.dx + jx,
+            y + sh.dy + jy,
+            s,
+            sh.color,
+            size,
+            (2.0 / n as f32).min(1.0),
+        );
+    }
+}
+
 fn sdf_rounded(r: Rect, radii: [(f32, f32); 4], x: f32, y: f32) -> f32 {
     let cx = r.x + r.width / 2.0;
     let cy = r.y + r.height / 2.0;
@@ -741,6 +806,11 @@ fn paint_text(canvas: &mut Canvas, b: &LayoutBox) {
     let sc = font::scale(size);
     let baseline =
         b.dims.content.y + (lh - (font::ASCENT + font::DESCENT) * sc) / 2.0 + font::ASCENT * sc;
+    if let Some(m) = map {
+        for s in text_shadows_of(m, color).iter().rev() {
+            paint_text_shadow(canvas, b.dims.content.x, baseline, t, size, s);
+        }
+    }
     canvas.text(b.dims.content.x, baseline, t, color, size);
 }
 
@@ -1491,6 +1561,13 @@ mod tests {
 
     fn eq(a: f32, b: f32) -> bool {
         (a - b).abs() < 1e-3
+    }
+
+    fn text_box<'a>(b: &'a LayoutBox<'a>) -> Option<&'a LayoutBox<'a>> {
+        if b.text.is_some() {
+            return Some(b);
+        }
+        b.children.iter().find_map(text_box)
     }
 
     #[test]
@@ -2436,7 +2513,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn shadow_spread() {
         let dom = parse_html("<html><div></div></html>");
         let sheet = parse_css(
@@ -2492,6 +2568,98 @@ mod tests {
         assert_eq!(canvas.pixel(24, 12), [0, 0, 255]);
         assert_eq!(canvas.pixel(26, 10), [255, 255, 255]);
         assert_eq!(canvas.pixel(25, 16), [255, 255, 255]);
+    }
+
+    #[test]
+    fn text_shadow_offset() {
+        let dom = parse_html("<html><p>W</p></html>");
+        let sheet = parse_css("p { font-size: 16px; text-shadow: 40px 4px #ff0000 }");
+        let styled = style_build(&dom, &sheet);
+        let tree = layout(&styled, 200.0).unwrap();
+        let canvas = paint(&tree, 200.0);
+        let tb = text_box(&tree).unwrap();
+        let sc = font::scale(16.0);
+        let baseline = tb.dims.content.y
+            + (16.0 * 1.2 - (font::ASCENT + font::DESCENT) * sc) / 2.0
+            + font::ASCENT * sc;
+        let top = baseline - font::ASCENT * sc;
+        let g = font::glyph('W');
+        let mut found = false;
+        for (r, row) in g.rows.iter().enumerate() {
+            for col in 0..g.width {
+                if (row >> col) & 1 == 1 && !found {
+                    let px = (tb.dims.content.x + col as f32 * sc + sc / 2.0) as u32;
+                    let py = (top + r as f32 * sc + sc / 2.0) as u32;
+                    assert_eq!(canvas.pixel(px, py), [0, 0, 0]);
+                    assert_eq!(canvas.pixel(px + 40, py + 4), [255, 0, 0]);
+                    found = true;
+                }
+            }
+        }
+        assert!(found);
+    }
+
+    #[test]
+    fn text_shadow_blur_spreads() {
+        let dom = parse_html("<html><p>W</p></html>");
+        let sheet = parse_css("p { font-size: 16px; text-shadow: 12px 0 8px #ff0000 }");
+        let styled = style_build(&dom, &sheet);
+        let tree = layout(&styled, 200.0).unwrap();
+        let canvas = paint(&tree, 200.0);
+        let tb = text_box(&tree).unwrap();
+        let sc = font::scale(16.0);
+        let baseline = tb.dims.content.y
+            + (16.0 * 1.2 - (font::ASCENT + font::DESCENT) * sc) / 2.0
+            + font::ASCENT * sc;
+        let top = baseline - font::ASCENT * sc;
+        let g = font::glyph('W');
+        let mut right = 0.0f32;
+        for row in g.rows.iter() {
+            for col in 0..g.width {
+                if (row >> col) & 1 == 1 {
+                    right = right.max((col + 1) as f32 * sc);
+                }
+            }
+        }
+        let edge = tb.dims.content.x + right + 12.0;
+        let mut halo = 0;
+        for y in (top as u32)..((top + 7.0 * sc) as u32) {
+            for x in ((edge + 1.0) as u32)..((edge + 8.0) as u32) {
+                let p = canvas.pixel(x, y);
+                if p[0] > 240 && p[1] < 210 {
+                    halo += 1;
+                }
+            }
+        }
+        assert!(halo > 0);
+    }
+
+    #[test]
+    fn text_shadow_none_and_short() {
+        let dom = parse_html("<html><p>W</p></html>");
+        let sheet = parse_css("p { font-size: 16px; text-shadow: none } q { text-shadow: #ff0000 }");
+        let styled = style_build(&dom, &sheet);
+        let tree = layout(&styled, 200.0).unwrap();
+        let canvas = paint(&tree, 200.0);
+        let tb = text_box(&tree).unwrap();
+        let sc = font::scale(16.0);
+        let baseline = tb.dims.content.y
+            + (16.0 * 1.2 - (font::ASCENT + font::DESCENT) * sc) / 2.0
+            + font::ASCENT * sc;
+        let top = baseline - font::ASCENT * sc;
+        let g = font::glyph('W');
+        let mut found = false;
+        for (r, row) in g.rows.iter().enumerate() {
+            for col in 0..g.width {
+                if (row >> col) & 1 == 1 && !found {
+                    let px = (tb.dims.content.x + col as f32 * sc + sc / 2.0) as u32;
+                    let py = (top + r as f32 * sc + sc / 2.0) as u32;
+                    assert_eq!(canvas.pixel(px + 40, py), [255, 255, 255]);
+                    found = true;
+                }
+            }
+        }
+        assert!(found);
     }
 
     #[test]

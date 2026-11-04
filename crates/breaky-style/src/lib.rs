@@ -5,7 +5,7 @@ use html::{Node, NodeKind};
 
 const BASE_FONT: f32 = 16.0;
 
-const INHERITED: [&str; 12] = [
+const INHERITED: [&str; 13] = [
     "color",
     "font-family",
     "font-size",
@@ -17,6 +17,7 @@ const INHERITED: [&str; 12] = [
     "list-style-position",
     "list-style-type",
     "text-align",
+    "text-shadow",
     "white-space",
 ];
 
