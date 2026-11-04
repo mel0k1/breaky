@@ -73,6 +73,11 @@ Workspace of small crates:
 - [x] Z-index
 - [x] Opacity
 - [x] Min and max dimensions
+- [x] Linear gradient
+- [x] Border radius
+- [x] Box shadow
+- [x] Pseudo elements
+- [x] Relative stacking contexts
 
 ## License
 
