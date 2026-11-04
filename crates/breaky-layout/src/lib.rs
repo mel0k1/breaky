@@ -1698,7 +1698,9 @@ impl<'a> LayoutBox<'a> {
         self.dims.border = self.edges(Family::Border, font, flow.width);
         self.dims.padding = self.edges(Family::Padding, font, flow.width);
         self.resolve_width(flow.width, font);
-        let explicit = self.num("height", font, flow.height);
+        let explicit = self
+            .num("height", font, flow.height)
+            .map(|h| self.clamp_h(h, font, flow.height));
         if let Some(h) = explicit {
             self.dims.content.height = h;
         }
@@ -1729,6 +1731,7 @@ impl<'a> LayoutBox<'a> {
             if let Some((_, ih)) = self.img_dims(font, flow.width) {
                 self.dims.content.height = ih;
             }
+            self.dims.content.height = self.clamp_h(self.dims.content.height, font, flow.height);
         }
     }
 
@@ -2183,7 +2186,9 @@ impl<'a> LayoutBox<'a> {
     }
 
     fn resolve_width(&mut self, avail: f32, font: f32) {
-        let w = self.num("width", font, avail);
+        let w = self
+            .num("width", font, avail)
+            .map(|v| self.clamp_w(v, font, avail));
         let m = self.margin_sides(font, avail);
         let fixed = self.dims.border.left
             + self.dims.border.right
@@ -2195,10 +2200,13 @@ impl<'a> LayoutBox<'a> {
                 let l = a.unwrap_or(0.0);
                 let r = b.unwrap_or(0.0);
                 let fill = rest(l + r).max(0.0);
-                let w = self
-                    .img_dims(font, avail)
-                    .map(|(iw, _)| iw.min(fill))
-                    .unwrap_or(fill);
+                let w = self.clamp_w(
+                    self.img_dims(font, avail)
+                        .map(|(iw, _)| iw.min(fill))
+                        .unwrap_or(fill),
+                    font,
+                    avail,
+                );
                 (l, r, w)
             }
             (Some(w), None, None) => {
@@ -2213,18 +2221,50 @@ impl<'a> LayoutBox<'a> {
         self.dims.content.width = width;
     }
 
+    fn clamp_w(&self, w: f32, font: f32, base: f32) -> f32 {
+        let min = self.num("min-width", font, base).unwrap_or(0.0).max(0.0);
+        match self.num("max-width", font, base) {
+            Some(max) => w.min(max).max(min),
+            None => w.max(min),
+        }
+    }
+
+    fn clamp_h(&self, h: f32, font: f32, base: f32) -> f32 {
+        let min = self.num("min-height", font, base).unwrap_or(0.0).max(0.0);
+        match self.num("max-height", font, base) {
+            Some(max) => h.min(max).max(min),
+            None => h.max(min),
+        }
+    }
+
     fn img_dims(&self, font: f32, base: f32) -> Option<(f32, f32)> {
         let (_, nw, nh, aw, ah) = self.img?;
         let nw = nw.max(1.0);
         let nh = nh.max(1.0);
         let w = self.num("width", font, base).or(aw);
         let h = self.num("height", font, base).or(ah);
-        Some(match (w, h) {
+        let mut dims = match (w, h) {
             (Some(w), Some(h)) => (w, h),
             (Some(w), None) => (w, w * nh / nw),
             (None, Some(h)) => (h * nw / nh, h),
             (None, None) => (nw, nh),
-        })
+        };
+        if let Some(max) = self.num("max-width", font, base) {
+            if dims.0 > max {
+                if h.is_none() {
+                    dims.1 *= max / dims.0;
+                }
+                dims.0 = max;
+            }
+        }
+        let min = self.num("min-width", font, base).unwrap_or(0.0);
+        if dims.0 < min && dims.0 > 0.0 {
+            if h.is_none() {
+                dims.1 *= min / dims.0;
+            }
+            dims.0 = min;
+        }
+        Some(dims)
     }
 
     fn measure_w(&self, parent_font: f32, base: f32) -> f32 {
@@ -2298,14 +2338,16 @@ impl<'a> LayoutBox<'a> {
         let pref = (self.max_content_w(font, avail) - used).max(0.0);
         let idim = self.img_dims(font, avail);
         self.dims.content.width = match (idim, self.num("width", font, avail)) {
-            (Some((iw, _)), None) => iw.min(room),
-            (_, cw) => cw.unwrap_or(pref.min(room)),
+            (Some((iw, _)), None) => self.clamp_w(iw.min(room), font, avail),
+            (_, cw) => self.clamp_w(cw.unwrap_or(pref.min(room)), font, avail),
         };
         self.dims.content.x =
             x + self.dims.margin.left + self.dims.border.left + self.dims.padding.left;
         self.dims.content.y =
             y + self.dims.margin.top + self.dims.border.top + self.dims.padding.top;
-        let explicit = self.num("height", font, avail);
+        let explicit = self
+            .num("height", font, avail)
+            .map(|h| self.clamp_h(h, font, avail));
         if let Some(h) = explicit {
             self.dims.content.height = h;
         }
@@ -2314,6 +2356,7 @@ impl<'a> LayoutBox<'a> {
             if let Some((_, ih)) = idim {
                 self.dims.content.height = ih;
             }
+            self.dims.content.height = self.clamp_h(self.dims.content.height, font, avail);
         }
     }
 
@@ -4539,6 +4582,105 @@ mod tests {
         for c in &b.children {
             walk(c, name, out);
         }
+    }
+
+    #[test]
+    fn max_width_limits_block() {
+        let dom = parse_html("<html><div></div></html>");
+        let sheet = parse_css("div { max-width: 30px; height: 10px }");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 100.0).unwrap();
+        let div = find(&root, "div");
+        assert!(eq(div.dims.content.width, 30.0));
+        let sheet = parse_css("div { width: 80px; max-width: 30px; height: 10px }");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 100.0).unwrap();
+        let div = find(&root, "div");
+        assert!(eq(div.dims.content.width, 30.0));
+    }
+
+    #[test]
+    fn min_width_expands_block() {
+        let dom = parse_html("<html><div></div></html>");
+        let sheet = parse_css("div { min-width: 150px; height: 10px }");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 100.0).unwrap();
+        let div = find(&root, "div");
+        assert!(eq(div.dims.content.width, 150.0));
+    }
+
+    #[test]
+    fn min_width_beats_max() {
+        let dom = parse_html("<html><div></div></html>");
+        let sheet = parse_css("div { min-width: 60px; max-width: 30px; height: 10px }");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 100.0).unwrap();
+        let div = find(&root, "div");
+        assert!(eq(div.dims.content.width, 60.0));
+    }
+
+    #[test]
+    fn max_height_limits_auto_height() {
+        let dom = parse_html("<html><div><p></p></div></html>");
+        let sheet = parse_css("div { max-height: 10px } p { margin: 0; height: 40px }");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 100.0).unwrap();
+        let div = find(&root, "div");
+        assert!(eq(div.dims.content.height, 10.0));
+        assert!(eq(root.dims.content.height, 10.0));
+    }
+
+    #[test]
+    fn min_height_grows_box() {
+        let dom = parse_html("<html><div></div></html>");
+        let sheet = parse_css("div { min-height: 30px }");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 100.0).unwrap();
+        let div = find(&root, "div");
+        assert!(eq(div.dims.content.height, 30.0));
+    }
+
+    #[test]
+    fn explicit_height_clamped() {
+        let dom = parse_html("<html><div></div></html>");
+        let sheet = parse_css("div { height: 50px; max-height: 20px }");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 100.0).unwrap();
+        assert!(eq(find(&root, "div").dims.content.height, 20.0));
+    }
+
+    #[test]
+    fn max_width_scales_image() {
+        let dom = parse_html("<html><body><img src=\"p.png\"></body></html>");
+        let sheet = parse_css("img { max-width: 2px }");
+        let styled = style_build(&dom, &sheet);
+        let imgs = img_store();
+        let root = layout_with(&styled, 200.0, &imgs).unwrap();
+        let im = &deep(&root, "img")[0];
+        assert!(eq(im.dims.content.width, 2.0));
+        assert!(eq(im.dims.content.height, 1.0));
+    }
+
+    #[test]
+    fn max_width_percent_image() {
+        let dom = parse_html("<html><body><img src=\"p.png\" width=\"40\"></body></html>");
+        let sheet = parse_css("body { width: 20px } img { max-width: 50% }");
+        let styled = style_build(&dom, &sheet);
+        let imgs = img_store();
+        let root = layout_with(&styled, 200.0, &imgs).unwrap();
+        let im = &deep(&root, "img")[0];
+        assert!(eq(im.dims.content.width, 10.0));
+        assert!(eq(im.dims.content.height, 5.0));
+    }
+
+    #[test]
+    fn inline_block_width_clamped() {
+        let dom = parse_html("<html><span></span></html>");
+        let sheet = parse_css("span { display: inline-block; width: 40px; max-width: 25px; height: 5px }");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 100.0).unwrap();
+        let span = &deep(&root, "span")[0];
+        assert!(eq(span.dims.content.width, 25.0));
     }
 
     fn img_store() -> img::Store {
