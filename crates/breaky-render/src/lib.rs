@@ -17,7 +17,18 @@ impl Canvas {
             width: w,
             height: h,
             clip: None,
-            pixels: vec![255; (w * h * 3) as usize],
+            pixels: vec![255; (w * h * 4) as usize],
+        }
+    }
+
+    fn new_transparent(width: u32, height: u32) -> Canvas {
+        let w = width.max(1);
+        let h = height.max(1);
+        Canvas {
+            width: w,
+            height: h,
+            clip: None,
+            pixels: vec![0; (w * h * 4) as usize],
         }
     }
 
@@ -25,7 +36,7 @@ impl Canvas {
         if x >= self.width || y >= self.height {
             return [255, 255, 255];
         }
-        let i = ((y * self.width + x) * 3) as usize;
+        let i = ((y * self.width + x) * 4) as usize;
         [
             self.pixels[i],
             self.pixels[i + 1],
@@ -71,6 +82,10 @@ impl Canvas {
     }
 
     fn blend(&mut self, x: i64, y: i64, c: Color) {
+        self.blend_alpha(x, y, c.r, c.g, c.b, c.a as f32 / 255.0);
+    }
+
+    fn blend_alpha(&mut self, x: i64, y: i64, r: u8, g: u8, b: u8, sa: f32) {
         if x < 0 || y < 0 || x >= self.width as i64 || y >= self.height as i64 {
             return;
         }
@@ -80,11 +95,37 @@ impl Canvas {
                 return;
             }
         }
-        let i = ((y as u32 * self.width + x as u32) * 3) as usize;
-        let a = c.a as f32 / 255.0;
-        for (k, ch) in [c.r, c.g, c.b].iter().enumerate() {
-            self.pixels[i + k] =
-                (*ch as f32 * a + self.pixels[i + k] as f32 * (1.0 - a)).round() as u8;
+        let i = ((y as u32 * self.width + x as u32) * 4) as usize;
+        let da = self.pixels[i + 3] as f32 / 255.0;
+        let oa = sa + da * (1.0 - sa);
+        for (k, ch) in [r, g, b].iter().enumerate() {
+            let v = if oa <= 0.0 {
+                0.0
+            } else {
+                (*ch as f32 * sa + self.pixels[i + k] as f32 * da * (1.0 - sa)) / oa
+            };
+            self.pixels[i + k] = v.round() as u8;
+        }
+        self.pixels[i + 3] = (oa * 255.0).round() as u8;
+    }
+
+    fn composite(&mut self, other: &Canvas, alpha: f32) {
+        for y in 0..self.height {
+            for x in 0..self.width {
+                let i = ((y * self.width + x) * 4) as usize;
+                let sa = (other.pixels[i + 3] as f32 / 255.0) * alpha;
+                if sa <= 0.0 {
+                    continue;
+                }
+                self.blend_alpha(
+                    x as i64,
+                    y as i64,
+                    other.pixels[i],
+                    other.pixels[i + 1],
+                    other.pixels[i + 2],
+                    sa,
+                );
+            }
         }
     }
 
@@ -169,7 +210,10 @@ impl Canvas {
         let mut raw = Vec::with_capacity((stride + 1) * self.height as usize);
         for y in 0..self.height as usize {
             raw.push(0);
-            raw.extend_from_slice(&self.pixels[y * stride..(y + 1) * stride]);
+            let row = y * self.width as usize * 4;
+            for x in 0..self.width as usize {
+                raw.extend_from_slice(&self.pixels[row + x * 4..row + x * 4 + 3]);
+            }
         }
         chunk(&mut out, b"IDAT", &zlib_store(&raw));
         chunk(&mut out, b"IEND", &[]);
@@ -246,6 +290,15 @@ fn z_index(b: &LayoutBox) -> i32 {
         Some(Value::Keyword(k)) => k.parse::<i32>().unwrap_or(0),
         _ => 0,
     }
+}
+
+fn opacity_of(m: &std::collections::HashMap<String, Vec<Value>>) -> f32 {
+    let n = match m.get("opacity").and_then(|v| v.first()) {
+        Some(Value::Length(n, _)) => *n,
+        Some(Value::Keyword(k)) => k.parse::<f32>().unwrap_or(1.0),
+        _ => 1.0,
+    };
+    n.clamp(0.0, 1.0)
 }
 
 fn sample_nearest(img: &Image, sx: f32, sy: f32) -> Color {
@@ -337,6 +390,17 @@ fn paint_img(canvas: &mut Canvas, b: &LayoutBox, imgs: &img::Store) {
 }
 
 fn paint_box(canvas: &mut Canvas, b: &LayoutBox, imgs: &img::Store) {
+    let op = computed(b).map(opacity_of).unwrap_or(1.0);
+    if op < 1.0 {
+        let mut scratch = Canvas::new_transparent(canvas.width, canvas.height);
+        paint_subtree(&mut scratch, b, imgs);
+        canvas.composite(&scratch, op);
+        return;
+    }
+    paint_subtree(canvas, b, imgs);
+}
+
+fn paint_subtree(canvas: &mut Canvas, b: &LayoutBox, imgs: &img::Store) {
     paint_bg(canvas, b, imgs);
     paint_img(canvas, b, imgs);
     let saved = canvas.clip;
@@ -1683,6 +1747,56 @@ mod tests {
         let tree = layout(&styled, 100.0).unwrap();
         let canvas = paint(&tree, 100.0);
         assert_eq!(canvas.pixel(10, 10), [0, 255, 255]);
+    }
+
+    #[test]
+    fn opacity_blends_backdrop() {
+        let dom = parse_html("<html><div></div></html>");
+        let sheet = parse_css(
+            "div { width: 20px; height: 10px; background-color: #ff0000; opacity: 0.5 }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let tree = layout(&styled, 100.0).unwrap();
+        let canvas = paint(&tree, 100.0);
+        assert_eq!(canvas.pixel(5, 5), [255, 128, 128]);
+        assert_eq!(canvas.pixel(25, 5), [255, 255, 255]);
+    }
+
+    #[test]
+    fn opacity_zero_hides() {
+        let dom = parse_html("<html><div></div></html>");
+        let sheet = parse_css(
+            "div { width: 20px; height: 10px; background-color: #ff0000; opacity: 0 }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let tree = layout(&styled, 100.0).unwrap();
+        let canvas = paint(&tree, 100.0);
+        assert_eq!(canvas.pixel(5, 5), [255, 255, 255]);
+    }
+
+    #[test]
+    fn opacity_groups_semi_transparent_children() {
+        let dom = parse_html("<html><div><p></p></div></html>");
+        let sheet = parse_css(
+            "div { width: 20px; height: 10px; background-color: #ff0000; opacity: 0.5 } p { margin: 0; width: 20px; height: 10px; background-color: rgba(0,0,255,0.5) }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let tree = layout(&styled, 100.0).unwrap();
+        let canvas = paint(&tree, 100.0);
+        assert_eq!(canvas.pixel(5, 5), [191, 128, 192]);
+    }
+
+    #[test]
+    fn opacity_nested_multiplies() {
+        let dom = parse_html("<html><div><p></p></div></html>");
+        let sheet = parse_css(
+            "div { width: 20px; height: 10px; background-color: #ff0000; opacity: 0.5 } p { margin: 0; width: 10px; height: 10px; background-color: #0000ff; opacity: 0.5 }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let tree = layout(&styled, 100.0).unwrap();
+        let canvas = paint(&tree, 100.0);
+        assert_eq!(canvas.pixel(5, 5), [192, 128, 192]);
+        assert_eq!(canvas.pixel(15, 5), [255, 128, 128]);
     }
 
     fn find_box<'a>(b: &'a LayoutBox<'a>, name: &str) -> Option<&'a LayoutBox<'a>> {
