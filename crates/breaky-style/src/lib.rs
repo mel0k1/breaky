@@ -30,7 +30,11 @@ pub struct StyledNode<'a> {
 }
 
 pub fn build<'a>(node: &'a Node, sheet: &Stylesheet) -> StyledNode<'a> {
-    build_rec(node, sheet, &[], None, BASE_FONT)
+    build_rec(node, sheet, &[], None, BASE_FONT, false)
+}
+
+pub fn build_selected<'a>(node: &'a Node, sheet: &Stylesheet) -> StyledNode<'a> {
+    build_rec(node, sheet, &[], None, BASE_FONT, true)
 }
 
 pub fn collect_css(node: &Node, out: &mut String) {
@@ -55,6 +59,7 @@ fn build_rec<'a>(
     ancestors: &[&'a Node],
     parent: Option<&HashMap<String, Vec<Value>>>,
     parent_font: f32,
+    sel: bool,
 ) -> StyledNode<'a> {
     let mut computed = HashMap::new();
     let mut font = parent_font;
@@ -139,6 +144,20 @@ fn build_rec<'a>(
             if let Some(m) = parent {
                 computed = m.clone();
             }
+            if sel {
+                if let Some(pe) = ancestors.last() {
+                    if matches!(pe.kind, NodeKind::Element { .. }) {
+                        let decls = pseudo_rules(
+                            pe,
+                            sheet,
+                            &ancestors[..ancestors.len() - 1],
+                            "selection",
+                        )
+                        .unwrap_or_default();
+                        apply_selection(&mut computed, &decls);
+                    }
+                }
+            }
         }
         _ => {}
     }
@@ -147,13 +166,13 @@ fn build_rec<'a>(
     let mut children: Vec<StyledNode<'a>> = node
         .children
         .iter()
-        .map(|c| build_rec(c, sheet, &chain, Some(&computed), font))
+        .map(|c| build_rec(c, sheet, &chain, Some(&computed), font, sel))
         .collect();
     if matches!(node.kind, NodeKind::Element { .. }) {
-        if let Some(b) = pseudo_node(node, sheet, ancestors, &computed, font, "before") {
+        if let Some(b) = pseudo_node(node, sheet, ancestors, &computed, font, "before", sel) {
             children.insert(0, b);
         }
-        if let Some(a) = pseudo_node(node, sheet, ancestors, &computed, font, "after") {
+        if let Some(a) = pseudo_node(node, sheet, ancestors, &computed, font, "after", sel) {
             children.push(a);
         }
         if block_container(node, &computed) {
@@ -226,11 +245,16 @@ fn pseudo_node<'a>(
     parent: &HashMap<String, Vec<Value>>,
     parent_font: f32,
     kind: &'static str,
+    sel: bool,
 ) -> Option<StyledNode<'a>> {
     let decls = pseudo_rules(node, sheet, ancestors, kind)?;
     let mut computed = HashMap::new();
     for d in &decls {
         computed.insert(d.name.clone(), d.value.clone());
+    }
+    if sel {
+        let sdecls = pseudo_rules(node, sheet, ancestors, "selection").unwrap_or_default();
+        apply_selection(&mut computed, &sdecls);
     }
     for key in INHERITED {
         if !computed.contains_key(key) {
@@ -351,6 +375,28 @@ fn insert_letter<'a>(
         }
     }
     false
+}
+
+fn apply_selection(computed: &mut HashMap<String, Vec<Value>>, decls: &[&css::Declaration]) {
+    for d in decls {
+        match d.name.as_str() {
+            "color" => {
+                computed.insert("::selection-color".to_string(), d.value.clone());
+            }
+            "background-color" => {
+                computed.insert("::selection-background".to_string(), d.value.clone());
+            }
+            "background" => {
+                if let Some(v) = d.value.iter().find_map(|v| match v {
+                    Value::Color(c) => Some(vec![Value::Color(*c)]),
+                    _ => None,
+                }) {
+                    computed.insert("::selection-background".to_string(), v);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 fn selector_matches(node: &Node, s: &Selector, ancestors: &[&Node]) -> bool {
@@ -682,5 +728,58 @@ mod tests {
         let s = build(&dom, &sheet);
         let p = el(&s, "p");
         assert_eq!(p.children[0].computed["color"], vec![rgb(0, 0, 255)]);
+    }
+
+    #[test]
+    fn selection_overlay_on_text() {
+        let dom = parse_html("<p>hi</p>");
+        let sheet = parse_css("p::selection { color: white; background-color: blue }");
+        let s = build_selected(&dom, &sheet);
+        let t = &el(&s, "p").children[0];
+        assert_eq!(t.computed["::selection-color"], vec![rgb(255, 255, 255)]);
+        assert_eq!(t.computed["::selection-background"], vec![rgb(0, 0, 255)]);
+    }
+
+    #[test]
+    fn selection_absent_in_plain_build() {
+        let dom = parse_html("<p>hi</p>");
+        let sheet = parse_css("p::selection { color: white }");
+        let s = build(&dom, &sheet);
+        let t = &el(&s, "p").children[0];
+        assert!(!t.computed.contains_key("::selection-color"));
+    }
+
+    #[test]
+    fn selection_bare_and_scoped() {
+        let dom = parse_html("<div><p>a</p></div><p>b</p>");
+        let sheet = parse_css("div p::selection { color: red }");
+        let s = build_selected(&dom, &sheet);
+        let inner = &el(el(&s, "div"), "p").children[0];
+        assert_eq!(inner.computed["::selection-color"], vec![rgb(255, 0, 0)]);
+        let outer = &s.children[1].children[0];
+        assert!(!outer.computed.contains_key("::selection-color"));
+    }
+
+    #[test]
+    fn selection_background_shorthand() {
+        let dom = parse_html("<p>hi</p>");
+        let sheet = parse_css("p::selection { background: #00ff00 }");
+        let s = build_selected(&dom, &sheet);
+        let t = &el(&s, "p").children[0];
+        assert_eq!(t.computed["::selection-background"], vec![rgb(0, 255, 0)]);
+    }
+
+    #[test]
+    fn selection_applies_to_pseudo_content() {
+        let dom = parse_html("<p>hi</p>");
+        let sheet = parse_css(
+            "p::before { content: \"x\" } p::selection { color: red; background-color: blue }",
+        );
+        let s = build_selected(&dom, &sheet);
+        let p = el(&s, "p");
+        let b = &p.children[0];
+        assert_eq!(b.pseudo.as_ref().unwrap().0, "before");
+        assert_eq!(b.computed["::selection-color"], vec![rgb(255, 0, 0)]);
+        assert_eq!(b.computed["::selection-background"], vec![rgb(0, 0, 255)]);
     }
 }

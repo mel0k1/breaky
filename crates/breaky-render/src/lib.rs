@@ -889,7 +889,7 @@ fn paint_text(canvas: &mut Canvas, b: &LayoutBox) {
         _ => return,
     };
     let map = computed(b);
-    let color = map
+    let mut color = map
         .and_then(|m| token_color(m, "color"))
         .unwrap_or(Color {
             r: 0,
@@ -897,6 +897,14 @@ fn paint_text(canvas: &mut Canvas, b: &LayoutBox) {
             b: 0,
             a: 255,
         });
+    if let Some(m) = map {
+        if let Some(c) = token_color(m, "::selection-color") {
+            color = c;
+        }
+    }
+    if let Some(bg) = map.and_then(|m| token_color(m, "::selection-background")) {
+        canvas.fill(b.dims.content, bg);
+    }
     let (size, lh) = text_metrics(map);
     let sc = font::scale(size);
     let baseline =
@@ -1663,6 +1671,13 @@ mod tests {
             return Some(b);
         }
         b.children.iter().find_map(text_box)
+    }
+
+    fn find_text<'a>(b: &'a LayoutBox<'a>, t: &str) -> Option<&'a LayoutBox<'a>> {
+        if b.text == Some(t) {
+            return Some(b);
+        }
+        b.children.iter().find_map(|c| find_text(c, t))
     }
 
     #[test]
@@ -2755,6 +2770,23 @@ mod tests {
             }
         }
         assert!(found);
+    }
+
+    #[test]
+    fn selection_highlight_paints() {
+        let dom = parse_html("<html><p class=\"s\">Select me</p><p class=\"n\">plain</p></html>");
+        let sheet = parse_css(
+            ".s::selection { color: #ffffff; background-color: #0000ff } p { font-size: 16px; width: 200px }",
+        );
+        let styled = style::build_selected(&dom, &sheet);
+        let tree = layout(&styled, 300.0).unwrap();
+        let canvas = paint(&tree, 300.0);
+        let tb = text_box(&tree).unwrap();
+        let c = &tb.dims.content;
+        assert_eq!(canvas.pixel((c.x + 1.0) as u32, (c.y + c.height / 2.0) as u32), [0, 0, 255]);
+        let nb = find_text(&tree, "plain").unwrap();
+        let n = &nb.dims.content;
+        assert_eq!(canvas.pixel(150, (n.y + n.height / 2.0) as u32), [255, 255, 255]);
     }
 
     #[test]

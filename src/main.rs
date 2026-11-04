@@ -6,7 +6,7 @@ use std::process::exit;
 use css::Value;
 use html::{Node, NodeKind};
 use net::Url;
-use style::{StyledNode, build};
+use style::{StyledNode, build, build_selected};
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -24,7 +24,12 @@ fn main() {
         style::collect_css(&dom, &mut doc_css);
         css_text.push_str(&doc_css);
         let sheet = css::parse(&css_text);
-        let styled = build(&dom, &sheet);
+        let selected = args.get(5).map(|s| s.as_str()) == Some("sel");
+        let styled = if selected {
+            build_selected(&dom, &sheet)
+        } else {
+            build(&dom, &sheet)
+        };
         println!();
         print_styled(&styled, 0);
         let viewport = args
@@ -227,7 +232,8 @@ fn fail<T>(e: std::io::Error) -> T {
 }
 
 fn usage() -> ! {
-    eprintln!("usage: breaky <file> [style.css] [width] [out.png]");
+    eprintln!("usage: breaky <file> [style.css] [width] [out.png] [sel]");
+    eprintln!("       breaky <file> <style.css> <target.css> <width> <out.png> [t]");
     eprintln!("       breaky fetch <url> [width] [out.png]");
     exit(2);
 }
