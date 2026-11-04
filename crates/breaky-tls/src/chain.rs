@@ -118,6 +118,7 @@ fn verify_cert_sig(cert: &Cert, key: &PubKey) -> Result<(), &'static str> {
     if ok {
         Ok(())
     } else {
+        eprintln!("DBG cert sig fail: alg={:?} key={:?}", cert.sig_alg, std::mem::discriminant(key));
         Err("signature invalid")
     }
 }

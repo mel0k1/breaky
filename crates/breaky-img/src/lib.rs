@@ -38,17 +38,45 @@ impl Store {
     }
 }
 
+pub struct Frame {
+    pub image: Image,
+    pub delay_ms: u32,
+}
+
+pub struct Anim {
+    pub width: u32,
+    pub height: u32,
+    pub frames: Vec<Frame>,
+}
+
 pub fn decode(bytes: &[u8]) -> Option<Image> {
+    decode_anim(bytes)
+        .and_then(|a| a.frames.into_iter().next())
+        .map(|f| f.image)
+}
+
+pub fn decode_anim(bytes: &[u8]) -> Option<Anim> {
     if bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
-        return decode_png(bytes);
+        return decode_png(bytes).map(single_frame);
     }
     if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
-        return decode_jpeg(bytes);
+        return decode_jpeg(bytes).map(single_frame);
     }
     if bytes.starts_with(b"GIF8") {
         return decode_gif(bytes);
     }
     None
+}
+
+fn single_frame(img: Image) -> Anim {
+    Anim {
+        width: img.width,
+        height: img.height,
+        frames: vec![Frame {
+            image: img,
+            delay_ms: 0,
+        }],
+    }
 }
 
 const ZZ: [usize; 64] = [
@@ -136,7 +164,7 @@ struct JComp {
     plane: Vec<u8>,
 }
 
-struct Frame {
+struct JFrame {
     w: u32,
     h: u32,
     prog: bool,
@@ -147,7 +175,7 @@ fn decode_jpeg(bytes: &[u8]) -> Option<Image> {
     let mut i = 2usize;
     let mut qt: Vec<Option<[u16; 64]>> = vec![None; 4];
     let mut ht: Vec<Option<Huff>> = (0..8).map(|_| None).collect();
-    let mut frame: Option<Frame> = None;
+    let mut frame: Option<JFrame> = None;
     let mut dri = 0usize;
     let mut adobe_rgb = false;
     while i + 1 < bytes.len() {
@@ -220,7 +248,7 @@ fn decode_jpeg(bytes: &[u8]) -> Option<Image> {
     render_frame(&f, adobe_rgb)
 }
 
-fn sof(seg: &[u8], prog: bool) -> Option<Frame> {
+fn sof(seg: &[u8], prog: bool) -> Option<JFrame> {
     if seg.len() < 6 || seg[0] != 8 {
         return None;
     }
@@ -270,7 +298,7 @@ fn sof(seg: &[u8], prog: bool) -> Option<Frame> {
         c.coef = vec![0i16; c.coef_w * rows * 64];
         c.plane = vec![0u8; c.stride * rows * 8];
     }
-    Some(Frame { w, h, prog, comps })
+    Some(JFrame { w, h, prog, comps })
 }
 
 fn dqt(seg: &[u8], qt: &mut Vec<Option<[u16; 64]>>) -> Option<()> {
@@ -337,7 +365,7 @@ fn dht(seg: &[u8], ht: &mut Vec<Option<Huff>>) -> Option<()> {
     Some(())
 }
 
-fn sos(f: &mut Frame, hdr: &[u8], ent: &[u8], ht: &[Option<Huff>], dri: usize) -> Option<usize> {
+fn sos(f: &mut JFrame, hdr: &[u8], ent: &[u8], ht: &[Option<Huff>], dri: usize) -> Option<usize> {
     if hdr.is_empty() {
         return None;
     }
@@ -676,7 +704,7 @@ fn decode_unit(
 
 const C2: [f32; 8] = [0.353_553_4, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5];
 
-fn finish(f: &mut Frame, qt: &[Option<[u16; 64]>], cos: &[f32; 64]) -> Option<()> {
+fn finish(f: &mut JFrame, qt: &[Option<[u16; 64]>], cos: &[f32; 64]) -> Option<()> {
     for ci in 0..f.comps.len() {
         let q = *qt.get(f.comps[ci].tq)?.as_ref()?;
         let blocks_w = (f.comps[ci].cw + 7) / 8;
@@ -733,7 +761,7 @@ fn bilinear(pl: &[u8], stride: usize, cw: usize, ch: usize, sx: f32, sy: f32) ->
     v.round() as u8
 }
 
-fn render_frame(f: &Frame, adobe_rgb: bool) -> Option<Image> {
+fn render_frame(f: &JFrame, adobe_rgb: bool) -> Option<Image> {
     let w = f.w as usize;
     let h = f.h as usize;
     let mut data = Vec::with_capacity(w * h * 4);
@@ -1307,7 +1335,7 @@ fn frame_rows(ih: u32, interlaced: bool) -> Vec<usize> {
     rows
 }
 
-fn decode_gif(bytes: &[u8]) -> Option<Image> {
+fn decode_gif(bytes: &[u8]) -> Option<Anim> {
     if bytes.len() < 14 || (&bytes[0..6] != b"GIF87a" && &bytes[0..6] != b"GIF89a") {
         return None;
     }
@@ -1324,7 +1352,9 @@ fn decode_gif(bytes: &[u8]) -> Option<Image> {
     let mut canvas = vec![0u8; (w * h * 4) as usize];
     let mut t_index: Option<u8> = None;
     let mut disposal: u8 = 0;
+    let mut delay_ms: u32 = 0;
     let mut pending: Option<(u8, u32, u32, u32, u32, Vec<u8>)> = None;
+    let mut frames: Vec<Frame> = Vec::new();
     loop {
         let b = *bytes.get(p)?;
         p += 1;
@@ -1350,6 +1380,7 @@ fn decode_gif(bytes: &[u8]) -> Option<Image> {
                         if d.len() >= 4 {
                             disposal = (d[0] >> 2) & 0x07;
                             t_index = if d[0] & 0x01 != 0 { Some(d[3]) } else { None };
+                            delay_ms = u16::from_le_bytes([d[1], d[2]]) as u32 * 10;
                         }
                     }
                 }
@@ -1421,16 +1452,28 @@ fn decode_gif(bytes: &[u8]) -> Option<Image> {
                     canvas[i + 3] = if t_index == Some(v) { 0 } else { 255 };
                 }
                 pending = Some((disposal, left, top, iw, ih, snap));
+                frames.push(Frame {
+                    image: Image {
+                        width: w,
+                        height: h,
+                        data: canvas.clone(),
+                    },
+                    delay_ms,
+                });
+                delay_ms = 0;
                 disposal = 0;
                 t_index = None;
             }
             _ => return None,
         }
     }
-    Some(Image {
+    if frames.is_empty() {
+        return None;
+    }
+    Some(Anim {
         width: w,
         height: h,
-        data: canvas,
+        frames,
     })
 }
 
@@ -2275,6 +2318,7 @@ mod tests {
         lct: Option<Vec<[u8; 3]>>,
         min_code: u8,
         indices: Vec<u8>,
+        gce: Option<(u8, u16)>,
     }
 
     fn build_gif(w: u16, h: u16, gct: &[[u8; 3]], frames: &[GF]) -> Vec<u8> {
@@ -2290,6 +2334,11 @@ mod tests {
             out.extend_from_slice(&c[..]);
         }
         for f in frames {
+            if let Some((d, cs)) = f.gce {
+                out.extend_from_slice(&[
+                    0x21, 0xF9, 0x04, d << 2, (cs & 0xff) as u8, (cs >> 8) as u8, 0, 0,
+                ]);
+            }
             out.extend_from_slice(&[0x2C]);
             out.extend_from_slice(&f.left.to_le_bytes());
             out.extend_from_slice(&f.top.to_le_bytes());
@@ -2365,13 +2414,18 @@ mod tests {
 
     #[test]
     fn gif_pil_disposal_restores_background() {
-        let img = decode(&b64(GIF_ANIM)).unwrap();
-        assert_eq!(img.width, 8);
-        assert_eq!(img.height, 8);
-        assert!(eq4(img.pixel(0, 0), [0, 0, 255, 255]));
-        assert!(eq4(img.pixel(3, 3), [0, 0, 255, 255]));
-        assert_eq!(img.pixel(5, 1)[3], 0);
-        assert_eq!(img.pixel(0, 6)[3], 0);
+        let anim = decode_anim(&b64(GIF_ANIM)).unwrap();
+        assert_eq!(anim.width, 8);
+        assert_eq!(anim.height, 8);
+        assert_eq!(anim.frames.len(), 2);
+        assert_eq!(anim.frames[0].delay_ms, 100);
+        assert_eq!(anim.frames[1].delay_ms, 100);
+        assert_eq!(anim.frames[0].image.pixel(0, 0)[3], 0);
+        assert_eq!(anim.frames[0].image.pixel(5, 1)[3], 0);
+        assert!(eq4(anim.frames[1].image.pixel(0, 0), [0, 0, 255, 255]));
+        assert!(eq4(anim.frames[1].image.pixel(3, 3), [0, 0, 255, 255]));
+        assert_eq!(anim.frames[1].image.pixel(5, 1)[3], 0);
+        assert_eq!(anim.frames[1].image.pixel(0, 6)[3], 0);
     }
 
     #[test]
@@ -2398,6 +2452,7 @@ mod tests {
             lct: Some(lct),
             min_code: 1,
             indices: vec![0, 1],
+            gce: None,
         };
         let img = decode(&build_gif(2, 1, &gct, &[f])).unwrap();
         assert!(eq4(img.pixel(0, 0), [0, 0, 255, 255]));
@@ -2416,6 +2471,7 @@ mod tests {
             lct: None,
             min_code: 1,
             indices: vec![0, 1, 1, 0],
+            gce: None,
         };
         let img = decode(&build_gif(4, 3, &gct, &[f])).unwrap();
         assert_eq!(img.pixel(0, 0)[3], 0);
@@ -2445,6 +2501,7 @@ mod tests {
             lct: None,
             min_code: 2,
             indices,
+            gce: None,
         };
         let img = decode(&build_gif(8, 8, &gct, &[f])).unwrap();
         for y in 0..8u32 {
@@ -2472,6 +2529,7 @@ mod tests {
             lct: None,
             min_code: 1,
             indices: vec![0, 0, 0, 0],
+            gce: None,
         };
         let f2 = GF {
             left: 1,
@@ -2482,12 +2540,50 @@ mod tests {
             lct: None,
             min_code: 1,
             indices: vec![1],
+            gce: None,
         };
-        let img = decode(&build_gif(2, 2, &gct, &[f1, f2])).unwrap();
-        assert!(eq4(img.pixel(0, 0), [255, 0, 0, 255]));
-        assert!(eq4(img.pixel(1, 0), [255, 0, 0, 255]));
-        assert!(eq4(img.pixel(0, 1), [255, 0, 0, 255]));
-        assert!(eq4(img.pixel(1, 1), [0, 255, 0, 255]));
+        let bytes = build_gif(2, 2, &gct, &[f1, f2]);
+        let anim = decode_anim(&bytes).unwrap();
+        assert_eq!(anim.frames.len(), 2);
+        assert!(eq4(anim.frames[0].image.pixel(0, 0), [255, 0, 0, 255]));
+        assert!(eq4(anim.frames[0].image.pixel(1, 1), [255, 0, 0, 255]));
+        assert!(eq4(anim.frames[1].image.pixel(0, 0), [255, 0, 0, 255]));
+        assert!(eq4(anim.frames[1].image.pixel(1, 1), [0, 255, 0, 255]));
+        let img = decode(&bytes).unwrap();
+        assert!(eq4(img.pixel(1, 1), [255, 0, 0, 255]));
+    }
+
+    #[test]
+    fn gif_anim_delays_and_disposal() {
+        let gct = vec![[255, 0, 0], [0, 255, 0]];
+        let f1 = GF {
+            left: 0,
+            top: 0,
+            w: 2,
+            h: 2,
+            interlace: false,
+            lct: None,
+            min_code: 1,
+            indices: vec![0, 0, 0, 0],
+            gce: Some((2, 30)),
+        };
+        let f2 = GF {
+            left: 1,
+            top: 1,
+            w: 1,
+            h: 1,
+            interlace: false,
+            lct: None,
+            min_code: 1,
+            indices: vec![1],
+            gce: Some((0, 50)),
+        };
+        let anim = decode_anim(&build_gif(2, 2, &gct, &[f1, f2])).unwrap();
+        assert_eq!(anim.frames[0].delay_ms, 300);
+        assert_eq!(anim.frames[1].delay_ms, 500);
+        assert!(eq4(anim.frames[0].image.pixel(1, 0), [255, 0, 0, 255]));
+        assert_eq!(anim.frames[1].image.pixel(0, 0)[3], 0);
+        assert!(eq4(anim.frames[1].image.pixel(1, 1), [0, 255, 0, 255]));
     }
 
     #[test]
@@ -2504,6 +2600,7 @@ mod tests {
             lct: None,
             min_code: 4,
             indices,
+            gce: None,
         };
         let img = decode(&build_gif(n as u16, 1, &gct, &[f])).unwrap();
         for x in [0u32, 37u32, 128u32, 199u32] {
@@ -2526,6 +2623,7 @@ mod tests {
             lct: None,
             min_code: 1,
             indices: vec![0, 1],
+            gce: None,
         };
         let full = build_gif(2, 1, &gct, &[f]);
         assert!(decode(&full[..12]).is_none());

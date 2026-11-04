@@ -16,6 +16,10 @@ fn main() {
         fetch(&args);
         return;
     }
+    if path == "anim" {
+        anim_cmd(&args);
+        return;
+    }
     if args.len() >= 6 {
         transition_page(&args);
         return;
@@ -147,6 +151,35 @@ fn fetch(args: &[String]) {
         let canvas = render::paint_with(&tree, viewport, &imgs);
         fs::write(out, canvas.to_png()).unwrap_or_else(fail);
         println!("saved {}", out);
+    }
+}
+
+fn anim_cmd(args: &[String]) {
+    let src = args.get(2).unwrap_or_else(|| usage());
+    let prefix = args.get(3).map(|s| s.as_str()).unwrap_or("frame");
+    let bytes = if src.contains("://") {
+        match net::get(src) {
+            Ok(resp) if resp.status == 200 => resp.body,
+            Ok(resp) => {
+                eprintln!("HTTP {}", resp.status);
+                exit(1);
+            }
+            Err(e) => {
+                eprintln!("{}", e);
+                exit(1);
+            }
+        }
+    } else {
+        fs::read(src).unwrap_or_else(fail)
+    };
+    let anim = img::decode_anim(&bytes).unwrap_or_else(|| {
+        eprintln!("{}: unsupported image", src);
+        exit(1);
+    });
+    for (i, f) in anim.frames.iter().enumerate() {
+        let name = format!("{}.{}.png", prefix, i);
+        fs::write(&name, render::Canvas::from_image(&f.image).to_png()).unwrap_or_else(fail);
+        println!("{} {}ms", name, f.delay_ms);
     }
 }
 
@@ -314,5 +347,6 @@ fn usage() -> ! {
     eprintln!("usage: breaky <file> [style.css] [width] [out.png] [sel]");
     eprintln!("       breaky <file> <style.css> <target.css> <width> <out.png> [t]");
     eprintln!("       breaky fetch <url> [width] [out.png]");
+    eprintln!("       breaky anim <file|url> [prefix]");
     exit(2);
 }

@@ -2,6 +2,14 @@ use std::collections::HashMap;
 use std::fmt;
 use std::io::{Read, Write};
 use std::net::TcpStream;
+use std::sync::OnceLock;
+
+use tls::ChainCache;
+
+fn chains() -> &'static ChainCache {
+    static CHAINS: OnceLock<ChainCache> = OnceLock::new();
+    CHAINS.get_or_init(ChainCache::new)
+}
 
 pub struct Url {
     pub scheme: String,
@@ -133,8 +141,8 @@ pub fn get_url(u: &Url, redirects: u8) -> Result<Response, String> {
     let mut raw = Vec::new();
     match u.scheme.as_str() {
         "https" => {
-            let mut tls =
-                tls::connect(stream, &u.host).map_err(|e| format!("tls {}: {}", u.host, e))?;
+            let mut tls = tls::connect_with_cache(stream, &u.host, chains())
+                .map_err(|e| format!("tls {}: {}", u.host, e))?;
             tls.write_all(req.as_bytes()).map_err(|e| e.to_string())?;
             tls.read_to_end(&mut raw).map_err(|e| e.to_string())?;
             tls.close().map_err(|e| e.to_string())?;
@@ -269,6 +277,13 @@ mod tests {
         assert_eq!(resp.status, 200);
         let text = String::from_utf8_lossy(&resp.body).to_lowercase();
         assert!(text.contains("example domain"));
+    }
+
+    #[test]
+    fn chain_cache_shared_per_process() {
+        let a = chains();
+        let b = chains();
+        assert!(std::ptr::eq(a, b));
     }
 
     #[test]

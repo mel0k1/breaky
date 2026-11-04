@@ -42,6 +42,10 @@ fn mul(a: u8, b: u8) -> u8 {
     r
 }
 
+pub trait Block {
+    fn encrypt_block(&self, block: &mut [u8; 16]);
+}
+
 pub struct Aes128 {
     keys: [[u8; 16]; 11],
 }
@@ -75,8 +79,10 @@ impl Aes128 {
         }
         Aes128 { keys }
     }
+}
 
-    pub fn encrypt_block(&self, block: &mut [u8; 16]) {
+impl Block for Aes128 {
+    fn encrypt_block(&self, block: &mut [u8; 16]) {
         add_round_key(block, &self.keys[0]);
         for r in 1..10 {
             for b in block.iter_mut() {
@@ -91,6 +97,64 @@ impl Aes128 {
         }
         shift_rows(block);
         add_round_key(block, &self.keys[10]);
+    }
+}
+
+pub struct Aes256 {
+    keys: [[u8; 16]; 15],
+}
+
+impl Aes256 {
+    pub fn new(key: &[u8; 32]) -> Aes256 {
+        let mut w = [[0u8; 4]; 60];
+        for i in 0..8 {
+            w[i].copy_from_slice(&key[i * 4..i * 4 + 4]);
+        }
+        let mut rcon = 1u8;
+        for i in 8..60 {
+            let mut t = w[i - 1];
+            if i % 8 == 0 {
+                t.rotate_left(1);
+                for b in t.iter_mut() {
+                    *b = SBOX[*b as usize];
+                }
+                t[0] ^= rcon;
+                rcon = xtime(rcon);
+            } else if i % 8 == 4 {
+                for b in t.iter_mut() {
+                    *b = SBOX[*b as usize];
+                }
+            }
+            for j in 0..4 {
+                w[i][j] = w[i - 8][j] ^ t[j];
+            }
+        }
+        let mut keys = [[0u8; 16]; 15];
+        for r in 0..15 {
+            for c in 0..4 {
+                keys[r][c * 4..c * 4 + 4].copy_from_slice(&w[r * 4 + c]);
+            }
+        }
+        Aes256 { keys }
+    }
+}
+
+impl Block for Aes256 {
+    fn encrypt_block(&self, block: &mut [u8; 16]) {
+        add_round_key(block, &self.keys[0]);
+        for r in 1..14 {
+            for b in block.iter_mut() {
+                *b = SBOX[*b as usize];
+            }
+            shift_rows(block);
+            mix_columns(block);
+            add_round_key(block, &self.keys[r]);
+        }
+        for b in block.iter_mut() {
+            *b = SBOX[*b as usize];
+        }
+        shift_rows(block);
+        add_round_key(block, &self.keys[14]);
     }
 }
 
@@ -126,7 +190,7 @@ fn mix_columns(block: &mut [u8; 16]) {
 
 #[cfg(test)]
 mod tests {
-    use super::Aes128;
+    use super::{Aes128, Aes256, Block};
 
     fn hex(d: &[u8]) -> String {
         d.iter().map(|b| format!("{:02x}", b)).collect()
@@ -153,5 +217,28 @@ mod tests {
         let mut block = [0u8; 16];
         aes.encrypt_block(&mut block);
         assert_eq!(hex(&block), "66e94bd4ef8a2c3b884cfa59ca342b2e");
+    }
+
+    #[test]
+    fn fips197_c3_aes256() {
+        let mut key = [0u8; 32];
+        for (i, b) in key.iter_mut().enumerate() {
+            *b = i as u8;
+        }
+        let aes = Aes256::new(&key);
+        let mut block = [
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+            0xee, 0xff,
+        ];
+        aes.encrypt_block(&mut block);
+        assert_eq!(hex(&block), "8ea2b7ca516745bfeafc49904b496089");
+    }
+
+    #[test]
+    fn aes256_zero_block() {
+        let aes = Aes256::new(&[0u8; 32]);
+        let mut block = [0u8; 16];
+        aes.encrypt_block(&mut block);
+        assert_eq!(hex(&block), "dc95c078a2408989ad48a21492842087");
     }
 }

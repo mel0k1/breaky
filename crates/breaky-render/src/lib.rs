@@ -21,6 +21,19 @@ impl Canvas {
         }
     }
 
+    pub fn from_image(img: &Image) -> Canvas {
+        let w = img.width.max(1);
+        let h = img.height.max(1);
+        let mut pixels = img.data.clone();
+        pixels.resize((w * h * 4) as usize, 0);
+        Canvas {
+            width: w,
+            height: h,
+            clip: None,
+            pixels,
+        }
+    }
+
     fn new_transparent(width: u32, height: u32) -> Canvas {
         let w = width.max(1);
         let h = height.max(1);

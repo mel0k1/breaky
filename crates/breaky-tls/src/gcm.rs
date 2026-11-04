@@ -1,4 +1,4 @@
-use crate::aes::Aes128;
+use crate::aes::Block;
 
 fn gmul(x: &[u8; 16], y: &[u8; 16]) -> [u8; 16] {
     let mut z = [0u8; 16];
@@ -38,14 +38,13 @@ fn inc32(block: &mut [u8; 16]) {
     block[12..16].copy_from_slice(&c.to_be_bytes());
 }
 
-pub struct Gcm {
-    aes: Aes128,
+pub struct Gcm<C> {
+    aes: C,
     h: [u8; 16],
 }
 
-impl Gcm {
-    pub fn new(key: &[u8; 16]) -> Gcm {
-        let aes = Aes128::new(key);
+impl<C: Block> Gcm<C> {
+    pub fn with_cipher(aes: C) -> Gcm<C> {
         let mut h = [0u8; 16];
         aes.encrypt_block(&mut h);
         Gcm { aes, h }
@@ -118,6 +117,7 @@ impl Gcm {
 #[cfg(test)]
 mod tests {
     use super::Gcm;
+    use crate::aes::Aes128;
 
     fn hex(d: &[u8]) -> String {
         d.iter().map(|b| format!("{:02x}", b)).collect()
@@ -145,7 +145,7 @@ mod tests {
 
     #[test]
     fn nist_tc1() {
-        let g = Gcm::new(&[0u8; 16]);
+        let g = Gcm::with_cipher(Aes128::new(&[0u8; 16]));
         let (ct, tag) = g.seal(&[0u8; 12], &[], &[0u8; 16]);
         assert_eq!(hex(&ct), "0388dace60b6a392f328c2b971b2fe78");
         assert_eq!(hex(&tag), "ab6e47d42cec13bdf53a67b21257bddf");
@@ -154,7 +154,7 @@ mod tests {
 
     #[test]
     fn nist_tc3() {
-        let g = Gcm::new(&key());
+        let g = Gcm::with_cipher(Aes128::new(&key()));
         let pt = unhex("d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a72");
         let (ct, tag) = g.seal(&nonce(), &[], &pt);
         assert_eq!(
@@ -167,7 +167,7 @@ mod tests {
 
     #[test]
     fn nist_tc4_with_aad() {
-        let g = Gcm::new(&key());
+        let g = Gcm::with_cipher(Aes128::new(&key()));
         let aad = unhex("feedfacedeadbeeffeedfacedeadbeefabaddad2");
         let pt = unhex("d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a721c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b391aafd255");
         let (ct, tag) = g.seal(&nonce(), &aad, &pt);
@@ -181,7 +181,7 @@ mod tests {
 
     #[test]
     fn odd_lengths_and_tamper() {
-        let g = Gcm::new(&key());
+        let g = Gcm::with_cipher(Aes128::new(&key()));
         for n in [1usize, 5, 15, 17, 31, 33, 100] {
             let pt: Vec<u8> = (0..n as u8).collect();
             let (ct, tag) = g.seal(&nonce(), b"hdr", &pt);

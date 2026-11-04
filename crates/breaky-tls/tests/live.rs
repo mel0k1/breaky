@@ -49,3 +49,20 @@ fn https_pypi_org() {
     assert!(lower.contains("200 ok"), "unexpected status: {}", body);
     assert!(lower.contains("<!doctype html>") || lower.contains("<html"), "{}", body);
 }
+
+#[test]
+#[ignore]
+fn https_chain_cache() {
+    let cache = tls::ChainCache::new();
+    for _ in 0..2 {
+        let stream = TcpStream::connect(("example.com", 443)).unwrap();
+        let mut client = tls::connect_with_cache(stream, "example.com", &cache).unwrap();
+        client
+            .write_all(b"GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        let mut buf = Vec::new();
+        client.read_to_end(&mut buf).unwrap();
+        client.close().unwrap();
+        assert!(String::from_utf8_lossy(&buf).to_lowercase().contains("200 ok"));
+    }
+}

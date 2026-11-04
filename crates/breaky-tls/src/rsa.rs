@@ -119,9 +119,6 @@ impl RsaPub {
         if excess == 0 || excess > 7 {
             return false;
         }
-        if db[0] >> (8 - excess) != 0 {
-            return false;
-        }
         db[0] &= 0xff >> excess;
         let mut idx = 0;
         while idx < dblen && db[idx] == 0 {

@@ -1,10 +1,13 @@
+use crate::aes;
 use crate::chacha;
 use crate::gcm;
+use crate::hash::Hash;
 use crate::poly;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Suite {
     Aes128Gcm,
+    Aes256Gcm,
     ChaCha20Poly1305,
 }
 
@@ -12,13 +15,21 @@ impl Suite {
     pub fn key_len(self) -> usize {
         match self {
             Suite::Aes128Gcm => 16,
-            Suite::ChaCha20Poly1305 => 32,
+            Suite::Aes256Gcm | Suite::ChaCha20Poly1305 => 32,
+        }
+    }
+
+    pub fn hash(self) -> Hash {
+        match self {
+            Suite::Aes128Gcm | Suite::ChaCha20Poly1305 => Hash::Sha256,
+            Suite::Aes256Gcm => Hash::Sha384,
         }
     }
 
     pub fn from_id(id: u16) -> Option<Suite> {
         match id {
             0x1301 => Some(Suite::Aes128Gcm),
+            0x1302 => Some(Suite::Aes256Gcm),
             0x1303 => Some(Suite::ChaCha20Poly1305),
             _ => None,
         }
@@ -51,7 +62,12 @@ pub fn seal(
         Suite::Aes128Gcm => {
             let mut k = [0u8; 16];
             k.copy_from_slice(&key[..16]);
-            gcm::Gcm::new(&k).seal(nonce, aad, pt)
+            gcm::Gcm::with_cipher(aes::Aes128::new(&k)).seal(nonce, aad, pt)
+        }
+        Suite::Aes256Gcm => {
+            let mut k = [0u8; 32];
+            k.copy_from_slice(&key[..32]);
+            gcm::Gcm::with_cipher(aes::Aes256::new(&k)).seal(nonce, aad, pt)
         }
         Suite::ChaCha20Poly1305 => {
             let mut k = [0u8; 32];
@@ -79,7 +95,12 @@ pub fn open(
         Suite::Aes128Gcm => {
             let mut k = [0u8; 16];
             k.copy_from_slice(&key[..16]);
-            gcm::Gcm::new(&k).open(nonce, aad, ct, tag)
+            gcm::Gcm::with_cipher(aes::Aes128::new(&k)).open(nonce, aad, ct, tag)
+        }
+        Suite::Aes256Gcm => {
+            let mut k = [0u8; 32];
+            k.copy_from_slice(&key[..32]);
+            gcm::Gcm::with_cipher(aes::Aes256::new(&k)).open(nonce, aad, ct, tag)
         }
         Suite::ChaCha20Poly1305 => {
             let mut k = [0u8; 32];
@@ -119,10 +140,35 @@ mod tests {
     #[test]
     fn suite_key_lens() {
         assert_eq!(Suite::Aes128Gcm.key_len(), 16);
+        assert_eq!(Suite::Aes256Gcm.key_len(), 32);
         assert_eq!(Suite::ChaCha20Poly1305.key_len(), 32);
         assert_eq!(Suite::from_id(0x1301), Some(Suite::Aes128Gcm));
+        assert_eq!(Suite::from_id(0x1302), Some(Suite::Aes256Gcm));
         assert_eq!(Suite::from_id(0x1303), Some(Suite::ChaCha20Poly1305));
-        assert_eq!(Suite::from_id(0x1302), None);
+        assert_eq!(Suite::from_id(0x1304), None);
+    }
+
+    #[test]
+    fn nist_gcm256() {
+        let key = unhex("feffe9928665731c6d6a8f9467308308feffe9928665731c6d6a8f9467308308");
+        let raw = unhex("cafebabefacedbaddecaf888");
+        let mut nonce = [0u8; 12];
+        nonce.copy_from_slice(&raw);
+        let (ct, tag) = seal(Suite::Aes256Gcm, &key, &nonce, &[], &[]);
+        assert!(ct.is_empty());
+        assert_eq!(hex(&tag), "fd2caa16a5832e76aa132c1453eeda7e");
+        let aad = unhex("feedfacedeadbeeffeedfacedeadbeefabaddad2");
+        let pt = unhex("d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a721c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b391aafd255");
+        let (ct, tag) = seal(Suite::Aes256Gcm, &key, &nonce, &aad, &pt);
+        assert_eq!(
+            hex(&ct),
+            "522dc1f099567d07f47f37a32a84427d643a8cdcbfe5c0c97598a2bd2555d1aa8cb08e48590dbb3da7b08b1056828838c5f61e6393ba7a0abcc9f662898015ad"
+        );
+        assert_eq!(hex(&tag), "2df7cd675b4f09163b41ebf980a7f638");
+        assert_eq!(
+            open(Suite::Aes256Gcm, &key, &nonce, &aad, &ct, &tag).unwrap(),
+            pt
+        );
     }
 
     #[test]
@@ -149,8 +195,12 @@ mod tests {
     }
 
     #[test]
-    fn roundtrip_and_tamper_both_suites() {
-        for suite in [Suite::Aes128Gcm, Suite::ChaCha20Poly1305] {
+    fn roundtrip_and_tamper_all_suites() {
+        for suite in [
+            Suite::Aes128Gcm,
+            Suite::Aes256Gcm,
+            Suite::ChaCha20Poly1305,
+        ] {
             let key = vec![9u8; suite.key_len()];
             let nonce = [3u8; 12];
             let aad = b"header";

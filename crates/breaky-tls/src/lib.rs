@@ -1,10 +1,12 @@
 mod aead;
 mod aes;
+mod cache;
 mod chacha;
 pub mod chain;
 mod der;
 mod field;
 mod gcm;
+mod hash;
 mod hmac;
 mod p256;
 mod p384;
@@ -17,11 +19,13 @@ mod sha512;
 mod x25519;
 pub mod x509;
 
+pub use cache::ChainCache;
+
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, TcpStream};
 
-use sha256::Sha256;
+use hash::Hash;
 
 const GROUP_X25519: u16 = 0x001d;
 const SIG_ECDSA_P256_SHA256: u16 = 0x0403;
@@ -66,17 +70,16 @@ struct Keys {
     key: [u8; 32],
     key_len: usize,
     iv: [u8; 12],
-    finished: [u8; 32],
+    finished: Vec<u8>,
 }
 
-fn keys_for(secret: &[u8; 32], suite: aead::Suite) -> Keys {
+fn keys_for(hash: Hash, secret: &[u8], suite: aead::Suite) -> Keys {
     let key_len = suite.key_len();
     let mut key = [0u8; 32];
-    key[..key_len].copy_from_slice(&hmac::expand_label(secret, "key", &[], key_len));
+    key[..key_len].copy_from_slice(&hmac::expand_label(hash, secret, "key", &[], key_len));
     let mut iv = [0u8; 12];
-    iv.copy_from_slice(&hmac::expand_label(secret, "iv", &[], 12));
-    let mut finished = [0u8; 32];
-    finished.copy_from_slice(&hmac::expand_label(secret, "finished", &[], 32));
+    iv.copy_from_slice(&hmac::expand_label(hash, secret, "iv", &[], 12));
+    let finished = hmac::expand_label(hash, secret, "finished", &[], hash.len());
     Keys {
         suite,
         key,
@@ -321,7 +324,7 @@ fn parse_chain(body: &[u8]) -> Result<Vec<x509::Cert>, TlsError> {
 fn verify_certificate_verify(
     cert: &x509::Cert,
     body: &[u8],
-    th: &[u8; 32],
+    th: &[u8],
 ) -> Result<(), TlsError> {
     if body.len() < 4 {
         return Err(TlsError::Protocol("bad certificate verify"));
@@ -368,7 +371,26 @@ pub fn connect_with_roots(
     roots: &[x509::Cert],
 ) -> Result<Client, TlsError> {
     let mut stream = stream;
-    let (read, write, _) = handshake(&mut stream, host, roots)?;
+    let (read, write, _) = handshake(&mut stream, host, roots, None)?;
+    Ok(Client {
+        stream,
+        pending: Vec::new(),
+        read,
+        write,
+        read_seq: 0,
+        write_seq: 0,
+        got_data: false,
+    })
+}
+
+pub fn connect_with_cache(
+    stream: TcpStream,
+    host: &str,
+    cache: &ChainCache,
+) -> Result<Client, TlsError> {
+    let roots = roots::load().map_err(TlsError::Cert)?;
+    let mut stream = stream;
+    let (read, write, _) = handshake(&mut stream, host, roots, Some(cache))?;
     Ok(Client {
         stream,
         pending: Vec::new(),
@@ -384,6 +406,7 @@ fn handshake(
     stream: &mut TcpStream,
     host: &str,
     roots: &[x509::Cert],
+    cache: Option<&ChainCache>,
 ) -> Result<(Keys, Keys, aead::Suite), TlsError> {
     let mut rnd = [0u8; 96];
     random_bytes(&mut rnd).map_err(TlsError::Io)?;
@@ -400,8 +423,9 @@ fn handshake(
     body.extend_from_slice(&client_random);
     body.push(32);
     body.extend_from_slice(&session_id);
-    body.extend_from_slice(&[0x00, 0x04]);
+    body.extend_from_slice(&[0x00, 0x06]);
     body.extend_from_slice(&0x1301u16.to_be_bytes());
+    body.extend_from_slice(&0x1302u16.to_be_bytes());
     body.extend_from_slice(&0x1303u16.to_be_bytes());
     body.extend_from_slice(&[0x01, 0x00]);
     let mut ext = Vec::new();
@@ -433,8 +457,8 @@ fn handshake(
     body.extend_from_slice(&ext);
 
     let ch = handshake_msg(1, &body);
-    let mut transcript = Sha256::new();
-    transcript.update(&ch);
+    let mut transcript: Vec<u8> = Vec::new();
+    transcript.extend_from_slice(&ch);
     write_plain(stream, 0x0301, 22, &ch)?;
 
     let (_, _, payload) = loop {
@@ -450,23 +474,29 @@ fn handshake(
         return Err(TlsError::Protocol("bad server hello framing"));
     }
     let hello = parse_server_hello(&payload[4..])?;
-    transcript.update(&payload);
+    transcript.extend_from_slice(&payload);
     if payload[0] == 2 && is_retry(&payload[4..]) {
         return Err(TlsError::Protocol("hello retry not supported"));
     }
     let shared = x25519::shared(client_priv, hello.server_pub);
 
-    let empty_hash = Sha256::new().finish();
-    let zeros = [0u8; 32];
-    let early = hmac::extract(&zeros, &zeros);
-    let d1 = hmac::derive_secret(&early, "derived", &empty_hash);
-    let hs_secret = hmac::extract(&d1, &shared);
-    let th1 = {
-        let t = transcript.clone();
-        t.finish()
-    };
-    let c_hs = keys_for(&hmac::derive_secret(&hs_secret, "c hs traffic", &th1), hello.suite);
-    let s_hs = keys_for(&hmac::derive_secret(&hs_secret, "s hs traffic", &th1), hello.suite);
+    let hash = hello.suite.hash();
+    let empty_hash = hash.one_shot(&[]);
+    let zeros = vec![0u8; hash.len()];
+    let early = hmac::extract(hash, &zeros, &zeros);
+    let d1 = hmac::derive_secret(hash, &early, "derived", &empty_hash);
+    let hs_secret = hmac::extract(hash, &d1, &shared);
+    let th1 = hash.one_shot(&transcript);
+    let c_hs = keys_for(
+        hash,
+        &hmac::derive_secret(hash, &hs_secret, "c hs traffic", &th1),
+        hello.suite,
+    );
+    let s_hs = keys_for(
+        hash,
+        &hmac::derive_secret(hash, &hs_secret, "s hs traffic", &th1),
+        hello.suite,
+    );
 
     let mut buf: Vec<u8> = Vec::new();
     let mut got_ee = false;
@@ -509,8 +539,14 @@ fn handshake(
                         return Err(TlsError::Protocol("unexpected certificate"));
                     }
                     certs = parse_chain(&msg[4..])?;
-                    chain::validate(&certs, roots, host, x509::unix_now())
-                        .map_err(TlsError::Cert)?;
+                    let leaf = certs.first().ok_or(TlsError::Cert("empty chain"))?;
+                    let now = x509::unix_now();
+                    if cache.map_or(true, |c| !c.hit(host, &leaf.tbs, now)) {
+                        chain::validate(&certs, roots, host, now).map_err(TlsError::Cert)?;
+                        if let Some(c) = cache {
+                            c.remember(host, &leaf.tbs, leaf.not_after);
+                        }
+                    }
                     got_cert = true;
                 }
                 15 => {
@@ -518,10 +554,7 @@ fn handshake(
                         return Err(TlsError::Protocol("unexpected certificate verify"));
                     }
                     let cert = certs.first().ok_or(TlsError::Cert("no certificate"))?;
-                    let th = {
-                        let t = transcript.clone();
-                        t.finish()
-                    };
+                    let th = hash.one_shot(&transcript);
                     verify_certificate_verify(cert, &msg[4..], &th)?;
                     got_cv = true;
                 }
@@ -529,32 +562,37 @@ fn handshake(
                     if !got_ee || !got_cert || !got_cv {
                         return Err(TlsError::Protocol("unexpected finished"));
                     }
-                    let th = {
-                        let t = transcript.clone();
-                        t.finish()
-                    };
-                    let expect = hmac::mac(&s_hs.finished, &th);
-                    if msg.len() != 36 || msg[4..] != expect[..] {
+                    let th = hash.one_shot(&transcript);
+                    let expect = hmac::hmac(hash, &s_hs.finished, &th);
+                    if msg.len() != 4 + hash.len() || msg[4..] != expect[..] {
                         return Err(TlsError::Protocol("bad finished"));
                     }
                     finished = true;
                 }
                 _ => return Err(TlsError::Protocol("unexpected handshake message")),
             }
-            transcript.update(&msg);
+            transcript.extend_from_slice(&msg);
         }
         if finished {
             break;
         }
     }
 
-    let master_salt = hmac::derive_secret(&hs_secret, "derived", &empty_hash);
-    let master = hmac::extract(&master_salt, &zeros);
-    let th2 = transcript.finish();
-    let c_ap = keys_for(&hmac::derive_secret(&master, "c ap traffic", &th2), hello.suite);
-    let s_ap = keys_for(&hmac::derive_secret(&master, "s ap traffic", &th2), hello.suite);
+    let master_salt = hmac::derive_secret(hash, &hs_secret, "derived", &empty_hash);
+    let master = hmac::extract(hash, &master_salt, &zeros);
+    let th2 = hash.one_shot(&transcript);
+    let c_ap = keys_for(
+        hash,
+        &hmac::derive_secret(hash, &master, "c ap traffic", &th2),
+        hello.suite,
+    );
+    let s_ap = keys_for(
+        hash,
+        &hmac::derive_secret(hash, &master, "s ap traffic", &th2),
+        hello.suite,
+    );
 
-    let cf = hmac::mac(&c_hs.finished, &th2);
+    let cf = hmac::hmac(hash, &c_hs.finished, &th2);
     let cf_msg = handshake_msg(20, &cf);
     write_plain(stream, 0x0303, 20, &[1])?;
     write_encrypted(stream, &c_hs, 0, 22, &cf_msg)?;
