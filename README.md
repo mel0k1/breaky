@@ -12,6 +12,7 @@ A browser engine in Rust. Educational, experimental.
 cargo run -- page.html [style.css] [width] [out.png] [sel]
 cargo run -- page.html base.css target.css width out.png [seconds]
 cargo run -- fetch http://example.com [width] [out.png]
+cargo run -- fetch https://example.com [width] [out.png]
 ```
 
 Prints the DOM tree, the styled tree with cascaded properties and the box
@@ -32,6 +33,7 @@ Workspace of small crates:
 - `breaky-font` — embedded bitmap font and glyph metrics
 - `breaky-img` — PNG, JPEG and GIF decoders (hand-written inflate, IDCT, LZW, zero deps)
 - `breaky-net` — HTTP client and URL resolution
+- `breaky-tls` — TLS 1.3 client (hand-rolled, zero deps)
 - `breaky` — CLI
 
 ## Roadmap
@@ -87,6 +89,8 @@ Workspace of small crates:
 - [x] First letter
 - [x] Selection
 - [x] Transitions
+- [x] Vector TTF font
+- [x] HTTPS over std::net (TLS 1.3, ChaCha20-Poly1305, X25519, RSA-PSS, ECDSA P-256)
 
 ## License
 

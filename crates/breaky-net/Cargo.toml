@@ -8,3 +8,6 @@ license = "MIT"
 [lib]
 name = "net"
 path = "src/lib.rs"
+
+[dependencies]
+breaky-tls = { path = "../breaky-tls" }

@@ -30,17 +30,16 @@ impl fmt::Display for Url {
 }
 
 pub fn parse_url(s: &str) -> Result<Url, String> {
-    let sep = s
-        .find("://")
-        .ok_or_else(|| format!("no scheme: {}", s))?;
+    let sep = s.find("://").ok_or_else(|| format!("no scheme: {}", s))?;
     let scheme = s[..sep].to_lowercase();
-    if scheme != "http" {
+    if scheme != "http" && scheme != "https" {
         return Err(format!("unsupported scheme: {}", scheme));
     }
     let rest = &s[sep + 3..];
     let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let netloc = &rest[..end];
     let tail = &rest[end..];
+    let default_port = if scheme == "https" { 443 } else { 80 };
     let (host, port) = match netloc.rfind(':') {
         Some(p) => (
             netloc[..p].to_string(),
@@ -48,7 +47,7 @@ pub fn parse_url(s: &str) -> Result<Url, String> {
                 .parse::<u16>()
                 .map_err(|_| format!("bad port: {}", s))?,
         ),
-        None => (netloc.to_string(), 80),
+        None => (netloc.to_string(), default_port),
     };
     if host.is_empty() {
         return Err(format!("no host: {}", s));
@@ -131,16 +130,25 @@ pub fn get_url(u: &Url, redirects: u8) -> Result<Response, String> {
         "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: breaky/0.1\r\nAccept: text/html,text/css,*/*\r\nConnection: close\r\n\r\n",
         u.path, u.host
     );
-    stream
-        .write_all(req.as_bytes())
-        .map_err(|e| e.to_string())?;
     let mut raw = Vec::new();
-    stream.read_to_end(&mut raw).map_err(|e| e.to_string())?;
+    match u.scheme.as_str() {
+        "https" => {
+            let mut tls =
+                tls::connect(stream, &u.host).map_err(|e| format!("tls {}: {}", u.host, e))?;
+            tls.write_all(req.as_bytes()).map_err(|e| e.to_string())?;
+            tls.read_to_end(&mut raw).map_err(|e| e.to_string())?;
+            tls.close().map_err(|e| e.to_string())?;
+        }
+        _ => {
+            stream
+                .write_all(req.as_bytes())
+                .map_err(|e| e.to_string())?;
+            stream.read_to_end(&mut raw).map_err(|e| e.to_string())?;
+        }
+    }
     let (status, headers, body) = parse_response(&raw)?;
     if matches!(status, 301 | 302 | 303 | 307 | 308) {
-        let loc = headers
-            .get("location")
-            .ok_or("redirect without location")?;
+        let loc = headers.get("location").ok_or("redirect without location")?;
         let next = resolve(u, loc)?;
         return get_url(&next, redirects + 1);
     }
@@ -236,10 +244,31 @@ mod tests {
     }
 
     #[test]
-    fn reject_non_http() {
-        assert!(parse_url("https://example.com").is_err());
+    fn reject_non_web_schemes() {
         assert!(parse_url("ftp://example.com").is_err());
+        assert!(parse_url("gopher://example.com").is_err());
         assert!(parse_url("example.com").is_err());
+    }
+
+    #[test]
+    fn parse_https_parts() {
+        let u = parse_url("https://example.com").unwrap();
+        assert_eq!(u.scheme, "https");
+        assert_eq!(u.port, 443);
+        assert_eq!(u.path, "/");
+        let u = parse_url("HTTPS://example.io:8443/x").unwrap();
+        assert_eq!(u.scheme, "https");
+        assert_eq!(u.port, 8443);
+        assert_eq!(u.path, "/x");
+    }
+
+    #[test]
+    #[ignore]
+    fn fetch_https_example() {
+        let resp = get("https://example.com").unwrap();
+        assert_eq!(resp.status, 200);
+        let text = String::from_utf8_lossy(&resp.body).to_lowercase();
+        assert!(text.contains("example domain"));
     }
 
     #[test]
@@ -277,7 +306,8 @@ mod tests {
 
     #[test]
     fn response_and_chunks() {
-        let raw = b"HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: 5\r\n\r\nhello";
+        let raw =
+            b"HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: 5\r\n\r\nhello";
         let (status, headers, body) = parse_response(raw).unwrap();
         assert_eq!(status, 404);
         assert_eq!(headers.get("content-type").unwrap(), "text/plain");
