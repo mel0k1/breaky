@@ -5,6 +5,7 @@ use layout::{BoxKind, LayoutBox, Rect};
 pub struct Canvas {
     pub width: u32,
     pub height: u32,
+    clip: Option<Rect>,
     pixels: Vec<u8>,
 }
 
@@ -15,6 +16,7 @@ impl Canvas {
         Canvas {
             width: w,
             height: h,
+            clip: None,
             pixels: vec![255; (w * h * 3) as usize],
         }
     }
@@ -69,6 +71,15 @@ impl Canvas {
     }
 
     fn blend(&mut self, x: i64, y: i64, c: Color) {
+        if x < 0 || y < 0 || x >= self.width as i64 || y >= self.height as i64 {
+            return;
+        }
+        if let Some(cl) = self.clip {
+            let (fx, fy) = (x as f32, y as f32);
+            if fx < cl.x || fy < cl.y || fx >= cl.x + cl.width || fy >= cl.y + cl.height {
+                return;
+            }
+        }
         let i = ((y as u32 * self.width + x as u32) * 3) as usize;
         let a = c.a as f32 / 255.0;
         for (k, ch) in [c.r, c.g, c.b].iter().enumerate() {
@@ -193,6 +204,9 @@ pub fn paint_with(root: &LayoutBox, viewport_width: f32, imgs: &img::Store) -> C
 
 fn max_bottom(b: &LayoutBox) -> f32 {
     let bb = b.dims.border_box();
+    if clips(b) {
+        return bb.y + bb.height;
+    }
     let mut m = bb.y + bb.height;
     for c in &b.children {
         m = m.max(max_bottom(c));
@@ -201,6 +215,26 @@ fn max_bottom(b: &LayoutBox) -> f32 {
         m = m.max(max_bottom(c));
     }
     m
+}
+
+fn clips(b: &LayoutBox) -> bool {
+    match computed(b).and_then(|m| m.get("overflow")).and_then(|v| v.first()) {
+        Some(Value::Keyword(k)) => matches!(k.as_str(), "hidden" | "clip" | "scroll" | "auto"),
+        _ => false,
+    }
+}
+
+fn intersect(a: Rect, b: Rect) -> Rect {
+    let x0 = a.x.max(b.x);
+    let y0 = a.y.max(b.y);
+    let x1 = (a.x + a.width).min(b.x + b.width);
+    let y1 = (a.y + a.height).min(b.y + b.height);
+    Rect {
+        x: x0,
+        y: y0,
+        width: (x1 - x0).max(0.0),
+        height: (y1 - y0).max(0.0),
+    }
 }
 
 fn sample_nearest(img: &Image, sx: f32, sy: f32) -> Color {
@@ -294,6 +328,14 @@ fn paint_img(canvas: &mut Canvas, b: &LayoutBox, imgs: &img::Store) {
 fn paint_box(canvas: &mut Canvas, b: &LayoutBox, imgs: &img::Store) {
     paint_bg(canvas, b, imgs);
     paint_img(canvas, b, imgs);
+    let saved = canvas.clip;
+    if clips(b) {
+        let r = b.dims.padding_box();
+        canvas.clip = Some(match saved {
+            Some(c) => intersect(c, r),
+            None => r,
+        });
+    }
     paint_text(canvas, b);
     paint_marker(canvas, b, imgs);
     for child in &b.children {
@@ -309,6 +351,7 @@ fn paint_box(canvas: &mut Canvas, b: &LayoutBox, imgs: &img::Store) {
     for child in &b.abs {
         paint_box(canvas, child, imgs);
     }
+    canvas.clip = saved;
 }
 
 fn paint_text(canvas: &mut Canvas, b: &LayoutBox) {
@@ -1505,6 +1548,64 @@ mod tests {
         let tree = layout(&styled, 100.0).unwrap();
         let canvas = paint(&tree, 100.0);
         assert_eq!(canvas.pixel(5, 5), [255, 0, 0]);
+    }
+
+    fn overflow_page(css: &str) -> Canvas {
+        let dom = parse_html("<html><body><div class=\"a\"><div class=\"b\"></div></div></body></html>");
+        let sheet = parse_css(css);
+        let styled = style_build(&dom, &sheet);
+        let tree = layout(&styled, 100.0).unwrap();
+        paint(&tree, 100.0)
+    }
+
+    #[test]
+    fn overflow_hidden_clips_children() {
+        let canvas = overflow_page(
+            ".a { width: 30px; height: 10px; overflow: hidden; background: #0000ff } .b { width: 50px; height: 20px; background: #ff0000 }",
+        );
+        assert_eq!(canvas.pixel(20, 5), [255, 0, 0]);
+        assert_eq!(canvas.pixel(20, 9), [255, 0, 0]);
+        assert_eq!(canvas.pixel(35, 5), [255, 255, 255]);
+        assert_eq!(canvas.pixel(20, 12), [255, 255, 255]);
+        assert_eq!(canvas.pixel(2, 2), [255, 0, 0]);
+    }
+
+    #[test]
+    fn overflow_visible_bleeds() {
+        let canvas = overflow_page(
+            ".a { width: 30px; height: 10px; background: #0000ff } .b { width: 50px; height: 20px; background: #ff0000 }",
+        );
+        assert_eq!(canvas.pixel(35, 5), [255, 0, 0]);
+        assert_eq!(canvas.pixel(20, 12), [255, 0, 0]);
+    }
+
+    #[test]
+    fn overflow_clip_intersects_ancestors() {
+        let dom = parse_html(
+            "<html><body><div class=\"a\"><div class=\"b\"><div class=\"c\"></div></div></div></body></html>",
+        );
+        let sheet = parse_css(
+            ".a { width: 30px; height: 30px; overflow: hidden } .b { margin-left: 10px; width: 50px; height: 50px; overflow: hidden } .c { width: 60px; height: 60px; background: #ff0000 }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let tree = layout(&styled, 100.0).unwrap();
+        let canvas = paint(&tree, 100.0);
+        assert_eq!(canvas.pixel(29, 5), [255, 0, 0]);
+        assert_eq!(canvas.pixel(31, 5), [255, 255, 255]);
+        assert_eq!(canvas.pixel(15, 5), [255, 0, 0]);
+        assert_eq!(canvas.pixel(9, 5), [255, 255, 255]);
+    }
+
+    #[test]
+    fn overflow_hidden_bounds_canvas_height() {
+        let dom = parse_html("<html><body><div class=\"a\"><p class=\"x\">t</p></div></body></html>");
+        let sheet = parse_css(
+            ".a { position: relative; width: 30px; height: 10px; overflow: hidden } .x { position: absolute; top: 50px; left: 0; width: 5px; height: 5px }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let tree = layout(&styled, 100.0).unwrap();
+        let canvas = paint(&tree, 100.0);
+        assert_eq!(canvas.height, 10);
     }
 
     fn find_box<'a>(b: &'a LayoutBox<'a>, name: &str) -> Option<&'a LayoutBox<'a>> {
