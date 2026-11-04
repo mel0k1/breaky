@@ -33,6 +33,21 @@ pub struct Gradient {
 pub enum Dir {
     Angle(f32),
     Corner(i8, i8),
+    Radial(Shape, Size, Stop, Stop),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Shape {
+    Circle,
+    Ellipse,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Size {
+    ClosestSide,
+    FarthestSide,
+    ClosestCorner,
+    FarthestCorner,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -83,6 +98,34 @@ impl fmt::Display for Gradient {
                 if y < 0 { "top" } else if y > 0 { "bottom" } else { "" },
                 if x < 0 { " left" } else if x > 0 { " right" } else { "" }
             ),
+            Dir::Radial(shape, size, cx, cy) => {
+                write!(
+                    f,
+                    "radial-gradient({}",
+                    match shape {
+                        Shape::Circle => "circle",
+                        Shape::Ellipse => "ellipse",
+                    }
+                )?;
+                if size != Size::FarthestCorner {
+                    write!(
+                        f,
+                        " {}",
+                        match size {
+                            Size::ClosestSide => "closest-side",
+                            Size::FarthestSide => "farthest-side",
+                            Size::ClosestCorner => "closest-corner",
+                            Size::FarthestCorner => "farthest-corner",
+                        }
+                    )?;
+                }
+                match (cx, cy) {
+                    (Stop::Pct(x), Stop::Pct(y)) => write!(f, " at {}% {}%", x, y)?,
+                    (Stop::Px(x), Stop::Px(y)) => write!(f, " at {}px {}px", x, y)?,
+                    _ => write!(f, " at center")?,
+                }
+                Ok(())
+            }
         }?;
         for (c, p) in &self.stops {
             write!(f, ", {}", c)?;
@@ -376,6 +419,9 @@ fn token(t: &str) -> Value {
 
 fn gradient(t: &str) -> Option<Gradient> {
     let low = t.to_lowercase();
+    if let Some(inner) = low.strip_prefix("radial-gradient(") {
+        return radial(inner.strip_suffix(')')?);
+    }
     let inner = low.strip_prefix("linear-gradient(")?.strip_suffix(')')?;
     let parts = split_commas(inner);
     if parts.is_empty() {
@@ -388,6 +434,98 @@ fn gradient(t: &str) -> Option<Gradient> {
     if rest.is_empty() {
         return None;
     }
+    let stops = stops_of(rest)?;
+    Some(Gradient { dir, stops })
+}
+
+fn radial(s: &str) -> Option<Gradient> {
+    let parts = split_commas(s);
+    if parts.is_empty() {
+        return None;
+    }
+    let mut shape = Shape::Ellipse;
+    let mut size = Size::FarthestCorner;
+    let (mut cx, mut cy) = (Stop::Pct(50.0), Stop::Pct(50.0));
+    let toks: Vec<&str> = parts[0].trim().split_whitespace().collect();
+    let spec = toks.iter().any(|t| {
+        matches!(
+            *t,
+            "circle"
+                | "ellipse"
+                | "at"
+                | "closest-side"
+                | "farthest-side"
+                | "closest-corner"
+                | "farthest-corner"
+        )
+    });
+    let rest = if spec {
+        let mut i = 0usize;
+        while i < toks.len() {
+            match toks[i] {
+                "circle" => {
+                    shape = Shape::Circle;
+                    i += 1;
+                }
+                "ellipse" => {
+                    shape = Shape::Ellipse;
+                    i += 1;
+                }
+                "closest-side" => {
+                    size = Size::ClosestSide;
+                    i += 1;
+                }
+                "farthest-side" => {
+                    size = Size::FarthestSide;
+                    i += 1;
+                }
+                "closest-corner" => {
+                    size = Size::ClosestCorner;
+                    i += 1;
+                }
+                "farthest-corner" => {
+                    size = Size::FarthestCorner;
+                    i += 1;
+                }
+                "at" => {
+                    i += 1;
+                    let x = toks.get(i).copied()?;
+                    cx = grad_pos(x)?;
+                    i += 1;
+                    if i < toks.len() {
+                        if let Some(p) = grad_pos(toks[i]) {
+                            cy = p;
+                            i += 1;
+                        }
+                    }
+                }
+                _ => return None,
+            }
+        }
+        &parts[1..]
+    } else {
+        &parts[..]
+    };
+    if rest.is_empty() {
+        return None;
+    }
+    let stops = stops_of(rest)?;
+    Some(Gradient {
+        dir: Dir::Radial(shape, size, cx, cy),
+        stops,
+    })
+}
+
+fn grad_pos(t: &str) -> Option<Stop> {
+    match t {
+        "left" | "top" => Some(Stop::Pct(0.0)),
+        "center" => Some(Stop::Pct(50.0)),
+        "right" | "bottom" => Some(Stop::Pct(100.0)),
+        _ => stop_pos(t),
+    }
+}
+
+fn stops_of(rest: &[String]) -> Option<Vec<(Color, Option<Stop>)>> {
     let mut stops = Vec::new();
     for p in rest {
         let toks = split_top(p);
@@ -401,7 +539,7 @@ fn gradient(t: &str) -> Option<Gradient> {
     if stops.len() < 2 {
         return None;
     }
-    Some(Gradient { dir, stops })
+    Some(stops)
 }
 
 fn side_dir(s: &str) -> Option<Dir> {
@@ -1023,5 +1161,78 @@ mod tests {
     fn gradient_rejects_single_stop() {
         let v = parse_value("linear-gradient(red)");
         assert_eq!(v, vec![Value::Keyword("linear-gradient(red)".into())]);
+    }
+
+    fn rad(v: Value) -> Gradient {
+        match v {
+            Value::Gradient(g) => g,
+            _ => panic!("not a gradient"),
+        }
+    }
+
+    #[test]
+    fn radial_defaults() {
+        let v = parse_value("radial-gradient(red, blue)");
+        let g = rad(v.into_iter().next().unwrap());
+        assert_eq!(
+            g.dir,
+            Dir::Radial(Shape::Ellipse, Size::FarthestCorner, Stop::Pct(50.0), Stop::Pct(50.0))
+        );
+        assert_eq!(g.stops.len(), 2);
+    }
+
+    #[test]
+    fn radial_shape_size_position() {
+        let v = parse_value("radial-gradient(circle closest-side at 30% 20%, red, blue)");
+        let g = rad(v.into_iter().next().unwrap());
+        assert_eq!(
+            g.dir,
+            Dir::Radial(Shape::Circle, Size::ClosestSide, Stop::Pct(30.0), Stop::Pct(20.0))
+        );
+        let v = parse_value("radial-gradient(circle at left top, red, blue)");
+        let g = rad(v.into_iter().next().unwrap());
+        assert_eq!(
+            g.dir,
+            Dir::Radial(Shape::Circle, Size::FarthestCorner, Stop::Pct(0.0), Stop::Pct(0.0))
+        );
+        let v = parse_value("radial-gradient(ellipse farthest-side at 10px 40px, red, blue)");
+        let g = rad(v.into_iter().next().unwrap());
+        assert_eq!(
+            g.dir,
+            Dir::Radial(Shape::Ellipse, Size::FarthestSide, Stop::Px(10.0), Stop::Px(40.0))
+        );
+    }
+
+    #[test]
+    fn radial_stop_positions() {
+        let v = parse_value("radial-gradient(red 10%, blue 80%)");
+        let g = rad(v.into_iter().next().unwrap());
+        assert_eq!(g.stops[0].1, Some(Stop::Pct(10.0)));
+        assert_eq!(g.stops[1].1, Some(Stop::Pct(80.0)));
+    }
+
+    #[test]
+    fn radial_display() {
+        let v = parse_value("radial-gradient(circle closest-side at 25% 75%, red, blue 50%)");
+        assert_eq!(
+            v[0].to_string(),
+            "radial-gradient(circle closest-side at 25% 75%, #ff0000, #0000ff 50%)"
+        );
+        let v = parse_value("radial-gradient(red, blue)");
+        assert_eq!(
+            v[0].to_string(),
+            "radial-gradient(ellipse at 50% 50%, #ff0000, #0000ff)"
+        );
+    }
+
+    #[test]
+    fn radial_rejects_garbage() {
+        let v = parse_value("radial-gradient(red)");
+        assert_eq!(v, vec![Value::Keyword("radial-gradient(red)".into())]);
+        let v = parse_value("radial-gradient(nonsense at red, blue)");
+        assert_eq!(
+            v,
+            vec![Value::Keyword("radial-gradient(nonsense at red, blue)".into())]
+        );
     }
 }

@@ -1,4 +1,4 @@
-use css::{Color, Dir, Gradient, Stop, Unit, Value};
+use css::{Color, Dir, Gradient, Shape, Size, Stop, Unit, Value};
 use img::Image;
 use layout::{BoxKind, LayoutBox, Rect};
 
@@ -117,6 +117,15 @@ impl Canvas {
     }
 
     fn fill_gradient(&mut self, r: Rect, g: &Gradient, radii: [(f32, f32); 4]) {
+        match g.dir {
+            Dir::Radial(shape, size, cx, cy) => {
+                self.fill_radial(r, shape, size, cx, cy, &g.stops, radii)
+            }
+            _ => self.fill_linear(r, g, radii),
+        }
+    }
+
+    fn fill_linear(&mut self, r: Rect, g: &Gradient, radii: [(f32, f32); 4]) {
         let w = r.width;
         let h = r.height;
         if w <= 0.0 || h <= 0.0 || g.stops.is_empty() {
@@ -136,6 +145,7 @@ impl Canvas {
                 }
                 (vx, vy)
             }
+            Dir::Radial(_, _, _, _) => return,
         };
         let n = (ux * ux + uy * uy).sqrt();
         if n <= 0.0 {
@@ -177,6 +187,91 @@ impl Canvas {
                 if inside_rounded(r, radii, x as f32, y as f32) {
                     self.blend(x, y, c);
                 }
+            }
+        }
+    }
+
+    fn fill_radial(
+        &mut self,
+        r: Rect,
+        shape: Shape,
+        size: Size,
+        cx: Stop,
+        cy: Stop,
+        stops: &[(Color, Option<Stop>)],
+        radii: [(f32, f32); 4],
+    ) {
+        let w = r.width;
+        let h = r.height;
+        if w <= 0.0 || h <= 0.0 || stops.is_empty() {
+            return;
+        }
+        let px = match cx {
+            Stop::Pct(v) => r.x + v / 100.0 * w,
+            Stop::Px(n) => r.x + n,
+        };
+        let py = match cy {
+            Stop::Pct(v) => r.y + v / 100.0 * h,
+            Stop::Px(n) => r.y + n,
+        };
+        let dxl = px - r.x;
+        let dxr = r.x + w - px;
+        let dyt = py - r.y;
+        let dyb = r.y + h - py;
+        let (rx, ry) = match (shape, size) {
+            (Shape::Circle, Size::FarthestCorner) => {
+                let d = (dxl.max(dxr) * dxl.max(dxr) + dyt.max(dyb) * dyt.max(dyb)).sqrt();
+                (d, d)
+            }
+            (Shape::Circle, Size::ClosestCorner) => {
+                let d = (dxl.min(dxr) * dxl.min(dxr) + dyt.min(dyb) * dyt.min(dyb)).sqrt();
+                (d, d)
+            }
+            (Shape::Circle, Size::ClosestSide) => {
+                let d = dxl.min(dxr).min(dyt.min(dyb));
+                (d, d)
+            }
+            (Shape::Circle, Size::FarthestSide) => {
+                let d = dxl.max(dxr).max(dyt.max(dyb));
+                (d, d)
+            }
+            (Shape::Ellipse, Size::FarthestCorner) => (
+                dxl.max(dxr) * std::f32::consts::SQRT_2,
+                dyt.max(dyb) * std::f32::consts::SQRT_2,
+            ),
+            (Shape::Ellipse, Size::ClosestCorner) => (
+                dxl.min(dxr) * std::f32::consts::SQRT_2,
+                dyt.min(dyb) * std::f32::consts::SQRT_2,
+            ),
+            (Shape::Ellipse, Size::ClosestSide) => (dxl.min(dxr), dyt.min(dyb)),
+            (Shape::Ellipse, Size::FarthestSide) => (dxl.max(dxr), dyt.max(dyb)),
+        };
+        if rx <= 0.0 || ry <= 0.0 {
+            return;
+        }
+        let stops = resolve_stops(stops, rx);
+        let rounded = radii.iter().any(|(x, y)| *x > 0.0 || *y > 0.0);
+        let x0 = r.x.floor().max(0.0) as i64;
+        let y0 = r.y.floor().max(0.0) as i64;
+        let x1 = ((r.x + w).ceil().min(self.width as f32)) as i64;
+        let y1 = ((r.y + h).ceil().min(self.height as f32)) as i64;
+        for y in y0..y1 {
+            let dy = y as f32 + 0.5 - py;
+            for x in x0..x1 {
+                if rounded && !inside_rounded(r, radii, x as f32, y as f32) {
+                    continue;
+                }
+                let dx = x as f32 + 0.5 - px;
+                let t = match shape {
+                    Shape::Circle => (dx * dx + dy * dy).sqrt() / rx,
+                    Shape::Ellipse => {
+                        let a = dx / rx;
+                        let b = dy / ry;
+                        (a * a + b * b).sqrt()
+                    }
+                };
+                let c = stop_color(&stops, t.clamp(0.0, 1.0) * rx);
+                self.blend(x, y, c);
             }
         }
     }
@@ -2922,5 +3017,64 @@ mod tests {
         let canvas = paint(&tree, 100.0);
         assert!(near(canvas.pixel(0, 5), 0, 0, 255));
         assert!(near(canvas.pixel(99, 5), 255, 0, 0));
+    }
+
+    #[test]
+    fn radial_gradient_center_edges() {
+        let dom = parse_html("<html><div></div></html>");
+        let sheet = parse_css(
+            "div { width: 100px; height: 100px; background-image: radial-gradient(ellipse farthest-side, #ff0000 0%, #ff0000 30%, #0000ff 97%) }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let tree = layout(&styled, 100.0).unwrap();
+        let canvas = paint(&tree, 100.0);
+        assert!(near(canvas.pixel(50, 50), 255, 0, 0));
+        assert!(near(canvas.pixel(50, 1), 0, 0, 255));
+        assert!(near(canvas.pixel(1, 50), 0, 0, 255));
+        let mid = canvas.pixel(50, 25);
+        assert!(mid[0] > 90 && mid[0] < 200);
+    }
+
+    #[test]
+    fn radial_circle_closest_side() {
+        let dom = parse_html("<html><div></div></html>");
+        let sheet = parse_css(
+            "div { width: 100px; height: 40px; background-image: radial-gradient(circle closest-side, #ff0000 0%, #ff0000 40%, #0000ff 90%) }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let tree = layout(&styled, 100.0).unwrap();
+        let canvas = paint(&tree, 100.0);
+        assert!(near(canvas.pixel(50, 20), 255, 0, 0));
+        assert!(near(canvas.pixel(50, 1), 0, 0, 255));
+        assert!(near(canvas.pixel(98, 20), 0, 0, 255));
+    }
+
+    #[test]
+    fn radial_offset_center() {
+        let dom = parse_html("<html><div></div></html>");
+        let sheet = parse_css(
+            "div { width: 100px; height: 100px; background-image: radial-gradient(circle at 10% 10%, #ff0000, #0000ff) }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let tree = layout(&styled, 100.0).unwrap();
+        let canvas = paint(&tree, 100.0);
+        assert!(near(canvas.pixel(10, 10), 255, 0, 0));
+        let far = canvas.pixel(90, 90);
+        assert!(far[2] > 200 && far[0] < 100);
+        assert!(canvas.pixel(90, 10)[0] < 200);
+    }
+
+    #[test]
+    fn radial_in_shorthand_and_rounded() {
+        let dom = parse_html("<html><div></div></html>");
+        let sheet = parse_css(
+            "div { width: 40px; height: 40px; border-radius: 20px; background: radial-gradient(circle farthest-side, #ff0000 0%, #ff0000 40%, #0000ff 85%) }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let tree = layout(&styled, 100.0).unwrap();
+        let canvas = paint(&tree, 100.0);
+        assert!(near(canvas.pixel(20, 20), 255, 0, 0));
+        assert_eq!(canvas.pixel(0, 0), [255, 255, 255]);
+        assert!(near(canvas.pixel(20, 2), 0, 0, 255));
     }
 }
