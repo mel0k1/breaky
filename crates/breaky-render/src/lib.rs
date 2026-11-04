@@ -61,30 +61,29 @@ impl Canvas {
     }
 
     pub fn text_alpha(&mut self, x: f32, y: f32, s: &str, c: Color, size: f32, a: f32) {
-        let sc = font::scale(size);
-        let top = y - font::ASCENT * sc;
         let sa = a * c.a as f32 / 255.0;
-        let mut pen = x;
+        let offs = font::offsets(s, size);
+        let mut i = 0;
         for ch in s.chars() {
-            let g = font::glyph(ch);
-            for (r, row) in g.rows.iter().enumerate() {
-                for col in 0..g.width {
-                    if (row >> col) & 1 == 1 {
-                        let gx = pen + col as f32 * sc;
-                        let gy = top + r as f32 * sc;
-                        let x0 = gx.floor().max(0.0) as i64;
-                        let y0 = gy.floor().max(0.0) as i64;
-                        let x1 = (gx + sc).ceil().min(self.width as f32) as i64;
-                        let y1 = (gy + sc).ceil().min(self.height as f32) as i64;
-                        for yy in y0..y1 {
-                            for xx in x0..x1 {
-                                self.blend_alpha(xx, yy, c.r, c.g, c.b, sa);
-                            }
-                        }
+            let ox = offs[i];
+            i += 1;
+            if matches!(ch, '\n' | '\r') {
+                continue;
+            }
+            let bmp = font::rasterize(ch, size);
+            if bmp.width == 0 {
+                continue;
+            }
+            let bx = (x + ox).round() as i64 + bmp.left as i64;
+            let by = y.round() as i64 + bmp.top as i64;
+            for py in 0..bmp.height {
+                for px in 0..bmp.width {
+                    let cov = bmp.cover[py * bmp.width + px] as f32 / 255.0;
+                    if cov > 0.0 {
+                        self.blend_alpha(bx + px as i64, by + py as i64, c.r, c.g, c.b, sa * cov);
                     }
                 }
             }
-            pen += (g.width as f32 + 1.0) * sc;
         }
     }
 
@@ -906,9 +905,8 @@ fn paint_text(canvas: &mut Canvas, b: &LayoutBox) {
         canvas.fill(b.dims.content, bg);
     }
     let (size, lh) = text_metrics(map);
-    let sc = font::scale(size);
     let baseline =
-        b.dims.content.y + (lh - (font::ASCENT + font::DESCENT) * sc) / 2.0 + font::ASCENT * sc;
+        b.dims.content.y + (lh - (font::asc(size) + font::desc(size))) / 2.0 + font::asc(size);
     if let Some(m) = map {
         for s in text_shadows_of(m, color).iter().rev() {
             paint_text_shadow(canvas, b.dims.content.x, baseline, t, size, s);
@@ -931,9 +929,8 @@ fn paint_marker(canvas: &mut Canvas, b: &LayoutBox, imgs: &img::Store) {
             a: 255,
         });
     let (size, lh) = text_metrics(map);
-    let sc = font::scale(size);
     let baseline =
-        b.dims.content.y + (lh - (font::ASCENT + font::DESCENT) * sc) / 2.0 + font::ASCENT * sc;
+        b.dims.content.y + (lh - (font::asc(size) + font::desc(size))) / 2.0 + font::asc(size);
     if let Some(u) = b.marker_img {
         if let Some(im) = imgs.get(u) {
             canvas.image(
@@ -1799,48 +1796,68 @@ mod tests {
         assert_eq!(&raw[11..20], &canvas.pixels[9..18]);
     }
 
+    fn text_baseline(y: f32, size: f32, lh: f32) -> f32 {
+        y + (lh - (font::asc(size) + font::desc(size))) / 2.0 + font::asc(size)
+    }
+
     #[test]
     fn text_draws_glyphs() {
-        let dom = parse_html("<html><p>l</p></html>");
+        let dom = parse_html("<html><p>W</p></html>");
         let sheet = parse_css("");
         let styled = style_build(&dom, &sheet);
         let tree = layout(&styled, 100.0).unwrap();
         let canvas = paint(&tree, 100.0);
-        assert_eq!(canvas.pixel(0, 11), [0, 0, 0]);
-        assert_eq!(canvas.pixel(1, 5), [0, 0, 0]);
-        assert_eq!(canvas.pixel(4, 11), [255, 255, 255]);
-        assert_eq!(canvas.pixel(0, 15), [255, 255, 255]);
+        let tb = text_box(&tree).unwrap();
+        let baseline = text_baseline(tb.dims.content.y, 16.0, 19.2);
+        let (px, py, cov) = ink_pixel(tb.dims.content.x, baseline, 'W', 16.0);
+        let e = faded(cov, 255);
+        assert_eq!(canvas.pixel(px, py), [e, e, e]);
+        assert_eq!(canvas.pixel(0, 0), [255, 255, 255]);
     }
 
     #[test]
     fn text_color() {
-        let dom = parse_html("<html><p>l</p></html>");
+        let dom = parse_html("<html><p>W</p></html>");
         let sheet = parse_css("p { color: #ff0000 }");
         let styled = style_build(&dom, &sheet);
         let tree = layout(&styled, 100.0).unwrap();
         let canvas = paint(&tree, 100.0);
-        assert_eq!(canvas.pixel(0, 11), [255, 0, 0]);
+        let tb = text_box(&tree).unwrap();
+        let baseline = text_baseline(tb.dims.content.y, 16.0, 19.2);
+        let (px, py, cov) = ink_pixel(tb.dims.content.x, baseline, 'W', 16.0);
+        let e = faded(cov, 255);
+        assert_eq!(canvas.pixel(px, py), [255, e, e]);
     }
 
     #[test]
     fn text_inherited_color() {
-        let dom = parse_html("<html><div><p>l</p></div></html>");
+        let dom = parse_html("<html><div><p>W</p></div></html>");
         let sheet = parse_css("div { color: #0000ff }");
         let styled = style_build(&dom, &sheet);
         let tree = layout(&styled, 100.0).unwrap();
         let canvas = paint(&tree, 100.0);
-        assert_eq!(canvas.pixel(0, 11), [0, 0, 255]);
+        let tb = text_box(&tree).unwrap();
+        let baseline = text_baseline(tb.dims.content.y, 16.0, 19.2);
+        let (px, py, cov) = ink_pixel(tb.dims.content.x, baseline, 'W', 16.0);
+        let e = faded(cov, 255);
+        assert_eq!(canvas.pixel(px, py), [e, e, 255]);
     }
 
     #[test]
     fn text_font_size_scales() {
-        let dom = parse_html("<html><p>l</p></html>");
+        let dom = parse_html("<html><p>W</p></html>");
         let sheet = parse_css("p { font-size: 32px }");
         let styled = style_build(&dom, &sheet);
         let tree = layout(&styled, 100.0).unwrap();
         let canvas = paint(&tree, 100.0);
-        assert_eq!(canvas.pixel(0, 25), [0, 0, 0]);
-        assert_eq!(canvas.pixel(5, 25), [255, 255, 255]);
+        let tb = text_box(&tree).unwrap();
+        let baseline = text_baseline(tb.dims.content.y, 32.0, 38.4);
+        let (px, py, cov) = ink_pixel(tb.dims.content.x, baseline, 'W', 32.0);
+        let e = faded(cov, 255);
+        assert_eq!(canvas.pixel(px, py), [e, e, e]);
+        let b16 = font::rasterize('W', 16.0);
+        let b32 = font::rasterize('W', 32.0);
+        assert!(b32.width > b16.width);
     }
 
     #[test]
@@ -1850,8 +1867,13 @@ mod tests {
         let styled = style_build(&dom, &sheet);
         let tree = layout(&styled, 200.0).unwrap();
         let canvas = paint(&tree, 200.0);
-        assert_eq!(canvas.pixel(34, 5), [0, 0, 0]);
-        assert_eq!(canvas.pixel(20, 5), [255, 255, 255]);
+        let li = find_box(&tree, "li").expect("missing li");
+        let baseline = text_baseline(li.dims.content.y, 16.0, 19.2);
+        let mx = li.dims.content.x - font::width("\u{2022}", 16.0);
+        let (px, py, cov) = ink_pixel(mx, baseline, '\u{2022}', 16.0);
+        let e = faded(cov, 255);
+        assert_eq!(canvas.pixel(px, py), [e, e, e]);
+        assert_eq!(canvas.pixel(0, 0), [255, 255, 255]);
     }
 
     #[test]
@@ -1863,11 +1885,16 @@ mod tests {
         let styled = style_build(&dom, &sheet);
         let tree = layout(&styled, 200.0).unwrap();
         let canvas = paint(&tree, 200.0);
-        let x = font::width("a", 16.0) as u32 + 5;
+        let td = find_box(&tree, "td").expect("missing td");
+        let x = td.dims.content.x as u32;
         assert_eq!(canvas.pixel(x - 1, 2), [0, 0, 0]);
-        assert_eq!(canvas.pixel(x, 2), [0, 0, 0]);
-        assert_eq!(canvas.pixel(x - 2, 2), [255, 255, 255]);
-        assert_eq!(canvas.pixel(x + 1, 2), [255, 255, 255]);
+        assert_eq!(canvas.pixel(x - 2, 2), [0, 0, 0]);
+        assert_eq!(canvas.pixel(x, 2), [255, 255, 255]);
+        let gap = td.dims.content.x + td.dims.content.width;
+        let black = (gap.floor() as u32..gap.floor() as u32 + 7)
+            .filter(|&x| canvas.pixel(x, 2) == [0, 0, 0])
+            .count();
+        assert_eq!(black, 3);
     }
 
     #[test]
@@ -1877,13 +1904,17 @@ mod tests {
         let styled = style_build(&dom, &sheet);
         let tree = layout(&styled, 200.0).unwrap();
         let canvas = paint(&tree, 200.0);
-        assert_eq!(canvas.pixel(32, 8), [255, 0, 0]);
-        assert_eq!(canvas.pixel(28, 8), [255, 255, 255]);
-        assert_eq!(canvas.pixel(39, 8), [255, 255, 255]);
-        assert_eq!(canvas.pixel(32, 4), [255, 0, 0]);
-        assert_eq!(canvas.pixel(32, 12), [255, 0, 0]);
-        assert_eq!(canvas.pixel(32, 3), [255, 255, 255]);
-        assert_eq!(canvas.pixel(32, 13), [255, 255, 255]);
+        let li = find_box(&tree, "li").expect("missing li");
+        let baseline = text_baseline(li.dims.content.y, 16.0, 19.2);
+        let side = li.marker_size.0.max(1.0);
+        let cx = (li.dims.content.x - 2.0 - side / 2.0) as u32;
+        let cy = (baseline - side / 2.0) as u32;
+        let pad = side as u32 / 2 + 1;
+        assert_eq!(canvas.pixel(cx, cy), [255, 0, 0]);
+        assert_eq!(canvas.pixel(cx - pad, cy), [255, 255, 255]);
+        assert_eq!(canvas.pixel(cx + pad, cy), [255, 255, 255]);
+        assert_eq!(canvas.pixel(cx, cy - pad), [255, 255, 255]);
+        assert_eq!(canvas.pixel(cx, cy + pad), [255, 255, 255]);
     }
 
     #[test]
@@ -1906,10 +1937,8 @@ mod tests {
         let canvas = paint_with(&tree, 200.0, &imgs);
         let li = find_box(&tree, "li").expect("missing li");
         let lh = 19.2;
-        let sc = font::scale(16.0);
-        let baseline = li.dims.content.y
-            + (lh - (font::ASCENT + font::DESCENT) * sc) / 2.0
-            + font::ASCENT * sc;
+        let baseline = li.dims.content.y + (lh - (font::asc(16.0) + font::desc(16.0))) / 2.0
+            + font::asc(16.0);
         let mx = li.dims.content.x - 4.0;
         let by = baseline as u32;
         assert_eq!(canvas.pixel(mx as u32, by - 2), [255, 0, 0]);
@@ -2680,6 +2709,29 @@ mod tests {
         assert_eq!(canvas.pixel(25, 16), [255, 255, 255]);
     }
 
+    fn ink_pixel(x: f32, baseline: f32, ch: char, size: f32) -> (u32, u32, u8) {
+        let b = font::rasterize(ch, size);
+        let (mut bi, mut bj, mut best) = (0usize, 0usize, 0u8);
+        for py in 0..b.height {
+            for px in 0..b.width {
+                let v = b.cover[py * b.width + px];
+                if v > best {
+                    best = v;
+                    bi = px;
+                    bj = py;
+                }
+            }
+        }
+        assert!(best > 0);
+        let cx = x.round() as i64 + b.left as i64 + bi as i64;
+        let cy = baseline.round() as i64 + b.top as i64 + bj as i64;
+        (cx.max(0) as u32, cy.max(0) as u32, best)
+    }
+
+    fn faded(cov: u8, base: u8) -> u8 {
+        (base as f32 * (1.0 - cov as f32 / 255.0)).round() as u8
+    }
+
     #[test]
     fn text_shadow_offset() {
         let dom = parse_html("<html><p>W</p></html>");
@@ -2688,25 +2740,13 @@ mod tests {
         let tree = layout(&styled, 200.0).unwrap();
         let canvas = paint(&tree, 200.0);
         let tb = text_box(&tree).unwrap();
-        let sc = font::scale(16.0);
         let baseline = tb.dims.content.y
-            + (16.0 * 1.2 - (font::ASCENT + font::DESCENT) * sc) / 2.0
-            + font::ASCENT * sc;
-        let top = baseline - font::ASCENT * sc;
-        let g = font::glyph('W');
-        let mut found = false;
-        for (r, row) in g.rows.iter().enumerate() {
-            for col in 0..g.width {
-                if (row >> col) & 1 == 1 && !found {
-                    let px = (tb.dims.content.x + col as f32 * sc + sc / 2.0) as u32;
-                    let py = (top + r as f32 * sc + sc / 2.0) as u32;
-                    assert_eq!(canvas.pixel(px, py), [0, 0, 0]);
-                    assert_eq!(canvas.pixel(px + 40, py + 4), [255, 0, 0]);
-                    found = true;
-                }
-            }
-        }
-        assert!(found);
+            + (16.0 * 1.2 - (font::asc(16.0) + font::desc(16.0))) / 2.0
+            + font::asc(16.0);
+        let (px, py, cov) = ink_pixel(tb.dims.content.x, baseline, 'W', 16.0);
+        let e = faded(cov, 255);
+        assert_eq!(canvas.pixel(px, py), [e, e, e]);
+        assert_eq!(canvas.pixel(px + 40, py + 4), [255, e, e]);
     }
 
     #[test]
@@ -2717,26 +2757,18 @@ mod tests {
         let tree = layout(&styled, 200.0).unwrap();
         let canvas = paint(&tree, 200.0);
         let tb = text_box(&tree).unwrap();
-        let sc = font::scale(16.0);
         let baseline = tb.dims.content.y
-            + (16.0 * 1.2 - (font::ASCENT + font::DESCENT) * sc) / 2.0
-            + font::ASCENT * sc;
-        let top = baseline - font::ASCENT * sc;
-        let g = font::glyph('W');
-        let mut right = 0.0f32;
-        for row in g.rows.iter() {
-            for col in 0..g.width {
-                if (row >> col) & 1 == 1 {
-                    right = right.max((col + 1) as f32 * sc);
-                }
-            }
-        }
-        let edge = tb.dims.content.x + right + 12.0;
+            + (16.0 * 1.2 - (font::asc(16.0) + font::desc(16.0))) / 2.0
+            + font::asc(16.0);
+        let b = font::rasterize('W', 16.0);
+        let right = tb.dims.content.x.round() as i64 + b.left as i64 + b.width as i64;
+        let top = baseline.round() as i64 + b.top as i64;
+        let edge = right + 12;
         let mut halo = 0;
-        for y in (top as u32)..((top + 7.0 * sc) as u32) {
-            for x in ((edge + 1.0) as u32)..((edge + 8.0) as u32) {
-                let p = canvas.pixel(x, y);
-                if p[0] > 240 && p[1] < 210 {
+        for y in (top.max(0))..((top + b.height as i64).min(canvas.height as i64)) {
+            for x in (edge + 1)..((edge + 8).min(canvas.width as i64)) {
+                let p = canvas.pixel(x as u32, y as u32);
+                if p[0] > 240 && p[1] < 220 {
                     halo += 1;
                 }
             }
@@ -2752,24 +2784,11 @@ mod tests {
         let tree = layout(&styled, 200.0).unwrap();
         let canvas = paint(&tree, 200.0);
         let tb = text_box(&tree).unwrap();
-        let sc = font::scale(16.0);
         let baseline = tb.dims.content.y
-            + (16.0 * 1.2 - (font::ASCENT + font::DESCENT) * sc) / 2.0
-            + font::ASCENT * sc;
-        let top = baseline - font::ASCENT * sc;
-        let g = font::glyph('W');
-        let mut found = false;
-        for (r, row) in g.rows.iter().enumerate() {
-            for col in 0..g.width {
-                if (row >> col) & 1 == 1 && !found {
-                    let px = (tb.dims.content.x + col as f32 * sc + sc / 2.0) as u32;
-                    let py = (top + r as f32 * sc + sc / 2.0) as u32;
-                    assert_eq!(canvas.pixel(px + 40, py), [255, 255, 255]);
-                    found = true;
-                }
-            }
-        }
-        assert!(found);
+            + (16.0 * 1.2 - (font::asc(16.0) + font::desc(16.0))) / 2.0
+            + font::asc(16.0);
+        let (px, py, _) = ink_pixel(tb.dims.content.x, baseline, 'W', 16.0);
+        assert_eq!(canvas.pixel(px + 40, py), [255, 255, 255]);
     }
 
     #[test]
@@ -2858,12 +2877,15 @@ mod tests {
     #[test]
     fn pseudo_before_paints_text() {
         let dom = parse_html("<html><p></p></html>");
-        let sheet = parse_css("p::before { content: \"l\" }");
+        let sheet = parse_css("p::before { content: \"W\" }");
         let styled = style_build(&dom, &sheet);
         let tree = layout(&styled, 100.0).unwrap();
         let canvas = paint(&tree, 100.0);
-        assert_eq!(canvas.pixel(0, 11), [0, 0, 0]);
-        assert_eq!(canvas.pixel(1, 5), [0, 0, 0]);
+        let tb = text_box(&tree).unwrap();
+        let baseline = text_baseline(tb.dims.content.y, 16.0, 19.2);
+        let (px, py, cov) = ink_pixel(tb.dims.content.x, baseline, 'W', 16.0);
+        let e = faded(cov, 255);
+        assert_eq!(canvas.pixel(px, py), [e, e, e]);
     }
 
     #[test]

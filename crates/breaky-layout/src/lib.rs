@@ -3337,13 +3337,20 @@ mod tests {
     #[test]
     fn text_align_justify_spreads_spaces() {
         let dom = parse_html("<html><p>aa bb cc</p></html>");
-        let sheet = parse_css("p { width: 50px; text-align: justify }");
+        let sheet = parse_css(&format!(
+            "p {{ width: {}px; text-align: justify }}",
+            font::width("aa", 16.0) + font::width(" ", 16.0) + font::width("bb", 16.0)
+                + font::width(" ", 16.0) * 0.5
+        ));
         let styled = style_build(&dom, &sheet);
         let root = layout(&styled, 200.0).unwrap();
         let p = find(&root, "p");
         let anon = &p.children[0];
         let bb = &anon.children[2];
-        assert!(eq(bb.dims.content.x, font::width("aa", 16.0) + 10.0));
+        assert!(eq(
+            bb.dims.content.x,
+            font::width("aa", 16.0) + font::width(" ", 16.0) * 1.5
+        ));
         let cc = &anon.children[4];
         assert!(eq(cc.dims.content.x, 0.0));
         assert!(eq(cc.dims.content.y, 19.2));
@@ -3357,7 +3364,10 @@ mod tests {
         let root = layout(&styled, 200.0).unwrap();
         let p = find(&root, "p");
         let bb = &p.children[0].children[2];
-        assert!(eq(bb.dims.content.x, font::width("aa", 16.0) + 6.0));
+        assert!(eq(
+            bb.dims.content.x,
+            font::width("aa", 16.0) + font::width(" ", 16.0)
+        ));
     }
 
     #[test]
@@ -3676,12 +3686,13 @@ mod tests {
         );
         let sheet = parse_css("");
         let styled = style_build(&dom, &sheet);
-        let root = layout(&styled, 50.0).unwrap();
+        let vw = font::width("aaaa", 16.0) * 1.5;
+        let root = layout(&styled, vw).unwrap();
         let table = find(&root, "table");
-        assert!(eq(table.dims.content.width, 50.0));
+        assert!(eq(table.dims.content.width, vw));
         let row = &table.children[0];
-        assert!(eq(row.children[0].dims.content.width, 25.0));
-        assert!(eq(row.children[1].dims.content.x, 25.0));
+        assert!(eq(row.children[0].dims.content.width, vw / 2.0));
+        assert!(eq(row.children[1].dims.content.x, vw / 2.0));
     }
 
     #[test]
@@ -3868,7 +3879,10 @@ mod tests {
         let p = find(&root, "p");
         let anon = &p.children[0];
         let bb = &anon.children[2];
-        assert!(eq(bb.dims.content.x, font::width("aa", 16.0) + 6.0));
+        assert!(eq(
+            bb.dims.content.x,
+            font::width("aa", 16.0) + font::width(" ", 16.0)
+        ));
         assert!(eq(bb.dims.content.y, 0.0));
         assert!(eq(anon.dims.content.height, 19.2));
     }
@@ -3878,7 +3892,10 @@ mod tests {
         let dom = parse_html(
             "<html><p style=\"white-space:pre-wrap\">aa  bb  cc</p></html>",
         );
-        let sheet = parse_css("p { width: 50px }");
+        let sheet = parse_css(&format!(
+            "p {{ width: {}px }}",
+            font::width("aa", 16.0) + font::width("  ", 16.0) + font::width("bb", 16.0) * 0.5
+        ));
         let styled = style_build(&dom, &sheet);
         let root = layout(&styled, 200.0).unwrap();
         let p = find(&root, "p");
@@ -3894,7 +3911,10 @@ mod tests {
     #[test]
     fn word_wrap() {
         let dom = parse_html("<html><p>Hello world</p></html>");
-        let sheet = parse_css("p { width: 60px }");
+        let sheet = parse_css(&format!(
+            "p {{ width: {}px }}",
+            font::width("Hello", 16.0) + font::width(" ", 16.0) * 0.5
+        ));
         let styled = style_build(&dom, &sheet);
         let root = layout(&styled, 200.0).unwrap();
         let p = find(&root, "p");
@@ -3909,7 +3929,11 @@ mod tests {
     #[test]
     fn wrap_skips_leading_space() {
         let dom = parse_html("<html><p>aa bb cc</p></html>");
-        let sheet = parse_css("p { width: 50px }");
+        let sheet = parse_css(&format!(
+            "p {{ width: {}px }}",
+            font::width("aa", 16.0) + font::width(" ", 16.0) + font::width("bb", 16.0)
+                + font::width(" ", 16.0) * 0.5
+        ));
         let styled = style_build(&dom, &sheet);
         let root = layout(&styled, 200.0).unwrap();
         let p = find(&root, "p");
@@ -4008,7 +4032,8 @@ mod tests {
         let dom = parse_html("<html><div><a style=\"display:inline-block\">aaaa</a> <a style=\"display:inline-block\">bbbb</a></div></html>");
         let sheet = parse_css("a { padding: 2px }");
         let styled = style_build(&dom, &sheet);
-        let root = layout(&styled, 60.0).unwrap();
+        let vw = (font::width("aaaa", 16.0) + 4.0) * 2.0 + font::width(" ", 16.0) * 0.5;
+        let root = layout(&styled, vw).unwrap();
         let div = find(&root, "div");
         let anon = &div.children[0];
         let a2 = &anon.children[2];

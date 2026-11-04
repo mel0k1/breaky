@@ -9,6 +9,7 @@ use net::Url;
 use style::{StyledNode, build, build_selected};
 
 fn main() {
+    load_font();
     let args: Vec<String> = env::args().collect();
     let path = args.get(1).unwrap_or_else(|| usage());
     if path == "fetch" {
@@ -147,6 +148,40 @@ fn fetch(args: &[String]) {
         fs::write(out, canvas.to_png()).unwrap_or_else(fail);
         println!("saved {}", out);
     }
+}
+
+fn load_font() {
+    if let Ok(p) = env::var("BREAKY_FONT") {
+        if let Ok(b) = fs::read(&p) {
+            if font::set(&b) {
+                return;
+            }
+            eprintln!("{}: unsupported font", p);
+        }
+    }
+    for p in font_paths() {
+        if let Ok(b) = fs::read(&p) {
+            if font::set(&b) {
+                return;
+            }
+        }
+    }
+}
+
+fn font_paths() -> Vec<&'static str> {
+    vec![
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+        "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+        "/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf",
+        "/usr/share/fonts/TTF/DejaVuSans.ttf",
+        "/usr/local/share/fonts/DejaVuSans.ttf",
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+        "/System/Library/Fonts/Helvetica.ttc",
+        "C:\\Windows\\Fonts\\arial.ttf",
+        "C:\\Windows\\Fonts\\segoeui.ttf",
+    ]
 }
 
 fn gather_images(node: &StyledNode, out: &mut Vec<String>) {

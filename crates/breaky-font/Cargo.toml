@@ -2,7 +2,7 @@
 name = "breaky-font"
 version = "0.1.0"
 edition = "2021"
-description = "Embedded bitmap font and glyph metrics"
+description = "Vector TTF font parser, metrics and rasterizer"
 license = "MIT"
 
 [lib]
