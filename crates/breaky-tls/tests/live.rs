@@ -30,29 +30,22 @@ fn https_example_com() {
 
 #[test]
 #[ignore]
-fn local_rsa_server() {
-    let body = get("127.0.0.1", 9443);
+fn https_google_com() {
+    let body = get("google.com", 443);
+    let lower = body.to_lowercase();
     assert!(
-        body.to_lowercase().contains("200 ok"),
-        "no response: {}",
+        lower.contains("301 moved") || lower.contains("302 found") || lower.contains("200 ok"),
+        "unexpected status: {}",
         body
     );
+    assert!(lower.contains("location:"), "no redirect target: {}", body);
 }
 
 #[test]
 #[ignore]
-fn local_ec_server() {
-    let body = get("127.0.0.1", 9444);
-    assert!(
-        body.to_lowercase().contains("200 ok"),
-        "no response: {}",
-        body
-    );
-}
-
-#[test]
-#[ignore]
-fn rejects_wrong_host() {
-    let stream = TcpStream::connect(("127.0.0.1", 9443)).unwrap();
-    assert!(tls::connect(stream, "other.example").is_err());
+fn https_pypi_org() {
+    let body = get("pypi.org", 443);
+    let lower = body.to_lowercase();
+    assert!(lower.contains("200 ok"), "unexpected status: {}", body);
+    assert!(lower.contains("<!doctype html>") || lower.contains("<html"), "{}", body);
 }

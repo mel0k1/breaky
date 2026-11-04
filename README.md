@@ -33,7 +33,7 @@ Workspace of small crates:
 - `breaky-font` — embedded bitmap font and glyph metrics
 - `breaky-img` — PNG, JPEG and GIF decoders (hand-written inflate, IDCT, LZW, zero deps)
 - `breaky-net` — HTTP client and URL resolution
-- `breaky-tls` — TLS 1.3 client (hand-rolled, zero deps)
+- `breaky-tls` — TLS 1.3 client with X.509 chain validation to the system trust store (hand-rolled, zero deps)
 - `breaky` — CLI
 
 ## Roadmap
@@ -90,7 +90,8 @@ Workspace of small crates:
 - [x] Selection
 - [x] Transitions
 - [x] Vector TTF font
-- [x] HTTPS over std::net (TLS 1.3, ChaCha20-Poly1305, X25519, RSA-PSS, ECDSA P-256)
+- [x] HTTPS over std::net (TLS 1.3, AES-128-GCM, ChaCha20-Poly1305, X25519, RSA-PSS, ECDSA P-256)
+- [x] Certificate chain validation to system roots (X.509, RSA PKCS#1/PSS, ECDSA P-256/P-384, PEM store)
 
 ## License
 

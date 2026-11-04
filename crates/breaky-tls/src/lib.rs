@@ -1,14 +1,21 @@
 mod aead;
+mod aes;
 mod chacha;
+pub mod chain;
 mod der;
 mod field;
+mod gcm;
 mod hmac;
 mod p256;
+mod p384;
+pub mod pem;
 mod poly;
+pub mod roots;
 mod rsa;
 mod sha256;
+mod sha512;
 mod x25519;
-mod x509;
+pub mod x509;
 
 use std::fmt;
 use std::io::{self, Read, Write};
@@ -16,7 +23,6 @@ use std::net::{IpAddr, TcpStream};
 
 use sha256::Sha256;
 
-const CIPHER_CHACHA20_POLY1305: u16 = 0x1303;
 const GROUP_X25519: u16 = 0x001d;
 const SIG_ECDSA_P256_SHA256: u16 = 0x0403;
 const SIG_RSA_PSS_SHA256: u16 = 0x0804;
@@ -56,19 +62,28 @@ impl From<TlsError> for io::Error {
 }
 
 struct Keys {
+    suite: aead::Suite,
     key: [u8; 32],
+    key_len: usize,
     iv: [u8; 12],
     finished: [u8; 32],
 }
 
-fn keys_for(secret: &[u8; 32]) -> Keys {
+fn keys_for(secret: &[u8; 32], suite: aead::Suite) -> Keys {
+    let key_len = suite.key_len();
     let mut key = [0u8; 32];
-    key.copy_from_slice(&hmac::expand_label(secret, "key", &[], 32));
+    key[..key_len].copy_from_slice(&hmac::expand_label(secret, "key", &[], key_len));
     let mut iv = [0u8; 12];
     iv.copy_from_slice(&hmac::expand_label(secret, "iv", &[], 12));
     let mut finished = [0u8; 32];
     finished.copy_from_slice(&hmac::expand_label(secret, "finished", &[], 32));
-    Keys { key, iv, finished }
+    Keys {
+        suite,
+        key,
+        key_len,
+        iv,
+        finished,
+    }
 }
 
 fn random_bytes(buf: &mut [u8]) -> io::Result<()> {
@@ -134,8 +149,7 @@ fn write_plain(
 
 fn write_encrypted(
     stream: &mut TcpStream,
-    key: &[u8; 32],
-    iv: &[u8; 12],
+    keys: &Keys,
     seq: u64,
     typ: u8,
     payload: &[u8],
@@ -146,8 +160,14 @@ fn write_encrypted(
     let len = inner.len() + 16;
     hdr[3] = (len >> 8) as u8;
     hdr[4] = len as u8;
-    let nonce = nonce_for(iv, seq);
-    let (ct, tag) = aead::seal(key, &nonce, &hdr, &inner);
+    let nonce = nonce_for(&keys.iv, seq);
+    let (ct, tag) = aead::seal(
+        keys.suite,
+        &keys.key[..keys.key_len],
+        &nonce,
+        &hdr,
+        &inner,
+    );
     let mut rec = Vec::with_capacity(5 + ct.len() + 16);
     rec.extend_from_slice(&hdr);
     rec.extend_from_slice(&ct);
@@ -156,8 +176,7 @@ fn write_encrypted(
 }
 
 fn open_record(
-    key: &[u8; 32],
-    iv: &[u8; 12],
+    keys: &Keys,
     seq: u64,
     hdr: &[u8; 5],
     payload: &[u8],
@@ -168,9 +187,9 @@ fn open_record(
     let (ct, tag) = payload.split_at(payload.len() - 16);
     let mut tag_arr = [0u8; 16];
     tag_arr.copy_from_slice(tag);
-    let nonce = nonce_for(iv, seq);
-    let plain =
-        aead::open(key, &nonce, hdr, ct, &tag_arr).ok_or(TlsError::Protocol("decrypt failed"))?;
+    let nonce = nonce_for(&keys.iv, seq);
+    let plain = aead::open(keys.suite, &keys.key[..keys.key_len], &nonce, hdr, ct, &tag_arr)
+        .ok_or(TlsError::Protocol("decrypt failed"))?;
     let pos = plain
         .iter()
         .rposition(|b| *b != 0)
@@ -192,6 +211,7 @@ fn alert_err(payload: &[u8]) -> TlsError {
 
 struct Hello {
     server_pub: [u8; 32],
+    suite: aead::Suite,
 }
 
 fn parse_server_hello(b: &[u8]) -> Result<Hello, TlsError> {
@@ -207,9 +227,7 @@ fn parse_server_hello(b: &[u8]) -> Result<Hello, TlsError> {
     p += sid_len;
     let cipher = u16::from_be_bytes([b[p], b[p + 1]]);
     p += 2;
-    if cipher != CIPHER_CHACHA20_POLY1305 {
-        return Err(TlsError::Protocol("cipher suite"));
-    }
+    let suite = aead::Suite::from_id(cipher).ok_or(TlsError::Protocol("cipher suite"))?;
     if b.len() < p + 2 {
         return Err(TlsError::Protocol("short server hello"));
     }
@@ -252,12 +270,15 @@ fn parse_server_hello(b: &[u8]) -> Result<Hello, TlsError> {
         return Err(TlsError::Protocol("not tls 1.3"));
     }
     match server_pub {
-        Some(s) => Ok(Hello { server_pub: s }),
+        Some(s) => Ok(Hello {
+            server_pub: s,
+            suite,
+        }),
         None => Err(TlsError::Protocol("no key share")),
     }
 }
 
-fn parse_certificate(body: &[u8]) -> Result<x509::Cert, TlsError> {
+fn parse_chain(body: &[u8]) -> Result<Vec<x509::Cert>, TlsError> {
     if body.is_empty() {
         return Err(TlsError::Protocol("bad certificate"));
     }
@@ -270,32 +291,31 @@ fn parse_certificate(body: &[u8]) -> Result<x509::Cert, TlsError> {
         return Err(TlsError::Protocol("bad certificate"));
     }
     let list = &body[4 + ctx_len..4 + ctx_len + list_len];
-    if list.len() < 5 {
+    let mut certs = Vec::new();
+    let mut p = 0usize;
+    while p + 3 <= list.len() {
+        let cert_len = be24(&list[p..p + 3]);
+        p += 3;
+        if p + cert_len > list.len() {
+            return Err(TlsError::Protocol("bad certificate"));
+        }
+        let der = &list[p..p + cert_len];
+        p += cert_len;
+        let cert = x509::parse(der).ok_or(TlsError::Cert("unparsable"))?;
+        certs.push(cert);
+        if p + 2 > list.len() {
+            return Err(TlsError::Protocol("bad certificate"));
+        }
+        let ext_len = u16::from_be_bytes([list[p], list[p + 1]]) as usize;
+        p += 2 + ext_len;
+        if p > list.len() {
+            return Err(TlsError::Protocol("bad certificate"));
+        }
+    }
+    if certs.is_empty() {
         return Err(TlsError::Cert("empty chain"));
     }
-    let cert_len = be24(&list[0..3]);
-    if cert_len + 3 > list.len() {
-        return Err(TlsError::Protocol("bad certificate"));
-    }
-    let der = &list[3..3 + cert_len];
-    let cert = x509::parse(der).ok_or(TlsError::Cert("unparsable"))?;
-    let now = x509::unix_now();
-    if now < cert.not_before {
-        return Err(TlsError::Cert("not yet valid"));
-    }
-    if now > cert.not_after {
-        return Err(TlsError::Cert("expired"));
-    }
-    Ok(cert)
-}
-
-fn ecdsa_sig_parts(sig: &[u8]) -> Result<(&[u8], &[u8]), TlsError> {
-    let mut r = der::Reader::new(sig);
-    let seq = r.next(0x30).ok_or(TlsError::Cert("bad ecdsa sig"))?;
-    let mut sr = der::Reader::new(seq);
-    let rb = sr.next(0x02).ok_or(TlsError::Cert("bad ecdsa sig"))?;
-    let sb = sr.next(0x02).ok_or(TlsError::Cert("bad ecdsa sig"))?;
-    Ok((der::int_bytes(rb), der::int_bytes(sb)))
+    Ok(certs)
 }
 
 fn verify_certificate_verify(
@@ -323,10 +343,12 @@ fn verify_certificate_verify(
             Some(k) => k.verify_pss_sha256(&hash, sig),
             None => false,
         },
-        (x509::PubKey::EcP256 { x, y }, SIG_ECDSA_P256_SHA256) => match ecdsa_sig_parts(sig) {
-            Ok((r, s)) => p256::verify_ecdsa_p256_sha256(&hash, x, y, r, s),
-            Err(e) => return Err(e),
-        },
+        (x509::PubKey::EcP256 { x, y }, SIG_ECDSA_P256_SHA256) => {
+            match chain::ecdsa_sig_parts(sig) {
+                Ok((r, s)) => p256::verify_ecdsa_p256_sha256(&hash, x, y, r, s),
+                Err(m) => return Err(TlsError::Cert(m)),
+            }
+        }
         _ => return Err(TlsError::Cert("unsupported signature algorithm")),
     };
     if !ok {
@@ -335,24 +357,34 @@ fn verify_certificate_verify(
     Ok(())
 }
 
-pub fn connect(mut stream: TcpStream, host: &str) -> Result<Client, TlsError> {
-    let (read_key, read_iv, write_key, write_iv) = handshake(&mut stream, host)?;
+pub fn connect(stream: TcpStream, host: &str) -> Result<Client, TlsError> {
+    let roots = roots::load().map_err(TlsError::Cert)?;
+    connect_with_roots(stream, host, roots)
+}
+
+pub fn connect_with_roots(
+    stream: TcpStream,
+    host: &str,
+    roots: &[x509::Cert],
+) -> Result<Client, TlsError> {
+    let mut stream = stream;
+    let (read, write, _) = handshake(&mut stream, host, roots)?;
     Ok(Client {
         stream,
         pending: Vec::new(),
-        read_key,
-        read_iv,
+        read,
+        write,
         read_seq: 0,
-        write_key,
-        write_iv,
         write_seq: 0,
+        got_data: false,
     })
 }
 
 fn handshake(
     stream: &mut TcpStream,
     host: &str,
-) -> Result<([u8; 32], [u8; 12], [u8; 32], [u8; 12]), TlsError> {
+    roots: &[x509::Cert],
+) -> Result<(Keys, Keys, aead::Suite), TlsError> {
     let mut rnd = [0u8; 96];
     random_bytes(&mut rnd).map_err(TlsError::Io)?;
     let mut client_random = [0u8; 32];
@@ -368,8 +400,9 @@ fn handshake(
     body.extend_from_slice(&client_random);
     body.push(32);
     body.extend_from_slice(&session_id);
-    body.extend_from_slice(&[0x00, 0x02]);
-    body.extend_from_slice(&CIPHER_CHACHA20_POLY1305.to_be_bytes());
+    body.extend_from_slice(&[0x00, 0x04]);
+    body.extend_from_slice(&0x1301u16.to_be_bytes());
+    body.extend_from_slice(&0x1303u16.to_be_bytes());
     body.extend_from_slice(&[0x01, 0x00]);
     let mut ext = Vec::new();
     if host.parse::<IpAddr>().is_err() {
@@ -432,14 +465,14 @@ fn handshake(
         let t = transcript.clone();
         t.finish()
     };
-    let c_hs = keys_for(&hmac::derive_secret(&hs_secret, "c hs traffic", &th1));
-    let s_hs = keys_for(&hmac::derive_secret(&hs_secret, "s hs traffic", &th1));
+    let c_hs = keys_for(&hmac::derive_secret(&hs_secret, "c hs traffic", &th1), hello.suite);
+    let s_hs = keys_for(&hmac::derive_secret(&hs_secret, "s hs traffic", &th1), hello.suite);
 
     let mut buf: Vec<u8> = Vec::new();
     let mut got_ee = false;
     let mut got_cert = false;
     let mut got_cv = false;
-    let mut leaf: Option<x509::Cert> = None;
+    let mut certs: Vec<x509::Cert> = Vec::new();
     let mut read_seq: u64 = 0;
     loop {
         let (hdr, typ, payload) = read_record(stream)?;
@@ -447,7 +480,7 @@ fn handshake(
             20 => continue,
             21 => return Err(alert_err(&payload)),
             23 => {
-                let (inner, plain) = open_record(&s_hs.key, &s_hs.iv, read_seq, &hdr, &payload)?;
+                let (inner, plain) = open_record(&s_hs, read_seq, &hdr, &payload)?;
                 read_seq += 1;
                 match inner {
                     22 => buf.extend_from_slice(&plain),
@@ -475,18 +508,16 @@ fn handshake(
                     if !got_ee || got_cert {
                         return Err(TlsError::Protocol("unexpected certificate"));
                     }
-                    let cert = parse_certificate(&msg[4..])?;
-                    if cert.dns_names.is_empty() || !x509::host_matches(&cert.dns_names, host) {
-                        return Err(TlsError::Cert("hostname mismatch"));
-                    }
-                    leaf = Some(cert);
+                    certs = parse_chain(&msg[4..])?;
+                    chain::validate(&certs, roots, host, x509::unix_now())
+                        .map_err(TlsError::Cert)?;
                     got_cert = true;
                 }
                 15 => {
                     if !got_cert || got_cv {
                         return Err(TlsError::Protocol("unexpected certificate verify"));
                     }
-                    let cert = leaf.as_ref().ok_or(TlsError::Cert("no certificate"))?;
+                    let cert = certs.first().ok_or(TlsError::Cert("no certificate"))?;
                     let th = {
                         let t = transcript.clone();
                         t.finish()
@@ -520,14 +551,14 @@ fn handshake(
     let master_salt = hmac::derive_secret(&hs_secret, "derived", &empty_hash);
     let master = hmac::extract(&master_salt, &zeros);
     let th2 = transcript.finish();
-    let c_ap = keys_for(&hmac::derive_secret(&master, "c ap traffic", &th2));
-    let s_ap = keys_for(&hmac::derive_secret(&master, "s ap traffic", &th2));
+    let c_ap = keys_for(&hmac::derive_secret(&master, "c ap traffic", &th2), hello.suite);
+    let s_ap = keys_for(&hmac::derive_secret(&master, "s ap traffic", &th2), hello.suite);
 
     let cf = hmac::mac(&c_hs.finished, &th2);
     let cf_msg = handshake_msg(20, &cf);
     write_plain(stream, 0x0303, 20, &[1])?;
-    write_encrypted(stream, &c_hs.key, &c_hs.iv, 0, 22, &cf_msg)?;
-    Ok((s_ap.key, s_ap.iv, c_ap.key, c_ap.iv))
+    write_encrypted(stream, &c_hs, 0, 22, &cf_msg)?;
+    Ok((s_ap, c_ap, hello.suite))
 }
 
 fn is_retry(body: &[u8]) -> bool {
@@ -542,24 +573,16 @@ fn is_retry(body: &[u8]) -> bool {
 pub struct Client {
     stream: TcpStream,
     pending: Vec<u8>,
-    read_key: [u8; 32],
-    read_iv: [u8; 12],
+    read: Keys,
+    write: Keys,
     read_seq: u64,
-    write_key: [u8; 32],
-    write_iv: [u8; 12],
     write_seq: u64,
+    got_data: bool,
 }
 
 impl Client {
     pub fn close(&mut self) -> Result<(), TlsError> {
-        write_encrypted(
-            &mut self.stream,
-            &self.write_key,
-            &self.write_iv,
-            self.write_seq,
-            21,
-            &[0x01, 0x00],
-        )?;
+        write_encrypted(&mut self.stream, &self.write, self.write_seq, 21, &[0x01, 0x00])?;
         self.write_seq += 1;
         self.stream.flush().map_err(TlsError::Io)
     }
@@ -572,9 +595,18 @@ impl Read for Client {
                 let n = buf.len().min(self.pending.len());
                 buf[..n].copy_from_slice(&self.pending[..n]);
                 self.pending.drain(..n);
+                self.got_data = true;
                 return Ok(n);
             }
-            let (hdr, typ, payload) = read_record(&mut self.stream)?;
+            let (hdr, typ, payload) = match read_record(&mut self.stream) {
+                Ok(r) => r,
+                Err(TlsError::Io(e))
+                    if e.kind() == io::ErrorKind::UnexpectedEof && self.got_data =>
+                {
+                    return Ok(0);
+                }
+                Err(e) => return Err(e.into()),
+            };
             match typ {
                 20 => continue,
                 21 => {
@@ -587,11 +619,13 @@ impl Read for Client {
                     ));
                 }
                 23 => {
-                    let (inner, plain) =
-                        open_record(&self.read_key, &self.read_iv, self.read_seq, &hdr, &payload)?;
+                    let (inner, plain) = open_record(&self.read, self.read_seq, &hdr, &payload)?;
                     self.read_seq += 1;
                     match inner {
-                        23 => self.pending = plain,
+                        23 => {
+                            self.got_data = true;
+                            self.pending = plain;
+                        }
                         21 => {
                             if plain.len() >= 2 && plain[1] == 0 {
                                 return Ok(0);
@@ -630,8 +664,14 @@ impl Write for Client {
             let len = inner.len() + 16;
             hdr[3] = (len >> 8) as u8;
             hdr[4] = len as u8;
-            let nonce = nonce_for(&self.write_iv, self.write_seq);
-            let (ct, tag) = aead::seal(&self.write_key, &nonce, &hdr, &inner);
+            let nonce = nonce_for(&self.write.iv, self.write_seq);
+            let (ct, tag) = aead::seal(
+                self.write.suite,
+                &self.write.key[..self.write.key_len],
+                &nonce,
+                &hdr,
+                &inner,
+            );
             self.write_seq += 1;
             let mut rec = Vec::with_capacity(5 + ct.len() + 16);
             rec.extend_from_slice(&hdr);

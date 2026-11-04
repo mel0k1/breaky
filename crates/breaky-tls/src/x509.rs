@@ -1,16 +1,39 @@
 use crate::der::{self, Reader};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PubKey {
     Rsa { n: Vec<u8>, e: Vec<u8> },
     EcP256 { x: Vec<u8>, y: Vec<u8> },
+    EcP384 { x: Vec<u8>, y: Vec<u8> },
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SigAlg {
+    RsaPkcs1Sha256,
+    RsaPkcs1Sha384,
+    RsaPkcs1Sha512,
+    RsaPssSha256,
+    EcdsaSha256,
+    EcdsaSha384,
+    EcdsaSha512,
+    Other,
+}
+
+#[derive(Clone, Debug)]
 pub struct Cert {
     pub key: PubKey,
     pub not_before: i64,
     pub not_after: i64,
     pub dns_names: Vec<String>,
+    pub subject: Vec<u8>,
+    pub issuer: Vec<u8>,
+    pub tbs: Vec<u8>,
+    pub sig_alg: SigAlg,
+    pub sig: Vec<u8>,
+    pub ca: bool,
+    pub path_len: Option<u32>,
+    pub key_cert_sign: bool,
 }
 
 pub fn unix_now() -> i64 {
@@ -20,25 +43,79 @@ pub fn unix_now() -> i64 {
         .unwrap_or(0)
 }
 
+fn tlv_both<'a>(r: &mut Reader<'a>) -> Option<(&'a [u8], &'a [u8])> {
+    let start = r.rest();
+    let (_, v) = r.tlv()?;
+    Some((&start[..start.len() - r.rest().len()], v))
+}
+
+fn be_u32(b: &[u8]) -> u32 {
+    let mut v = 0u32;
+    for &x in b {
+        v = (v << 8) | x as u32;
+    }
+    v
+}
+
+fn parse_sig_alg(content: &[u8]) -> Option<SigAlg> {
+    let mut r = Reader::new(content);
+    let oid = r.next(0x06)?;
+    Some(if oid == der::OID_SHA256_RSA {
+        SigAlg::RsaPkcs1Sha256
+    } else if oid == der::OID_SHA384_RSA {
+        SigAlg::RsaPkcs1Sha384
+    } else if oid == der::OID_SHA512_RSA {
+        SigAlg::RsaPkcs1Sha512
+    } else if oid == der::OID_ECDSA_SHA256 {
+        SigAlg::EcdsaSha256
+    } else if oid == der::OID_ECDSA_SHA384 {
+        SigAlg::EcdsaSha384
+    } else if oid == der::OID_ECDSA_SHA512 {
+        SigAlg::EcdsaSha512
+    } else if oid == der::OID_RSA_PSS {
+        let mut pr = match r.next(0x30) {
+            Some(p) => Reader::new(p),
+            None => return Some(SigAlg::Other),
+        };
+        if pr.next(0x06) == Some(der::OID_SHA2_256) {
+            SigAlg::RsaPssSha256
+        } else {
+            SigAlg::Other
+        }
+    } else {
+        SigAlg::Other
+    })
+}
+
 pub fn parse(der: &[u8]) -> Option<Cert> {
     let mut outer = Reader::new(der);
     let cert = outer.next(0x30)?;
     let mut cr = Reader::new(cert);
-    let tbs = cr.next(0x30)?;
+    let (tbs_raw, tbs) = tlv_both(&mut cr)?;
+    if tbs_raw[0] != 0x30 {
+        return None;
+    }
     let mut tr = Reader::new(tbs);
     if tr.rest().first() == Some(&0xa0) {
         tr.tlv()?;
     }
     tr.next(0x02)?;
-    tr.next(0x30)?;
-    tr.next(0x30)?;
+    let (inner_alg_raw, _) = tlv_both(&mut tr)?;
+    if inner_alg_raw[0] != 0x30 {
+        return None;
+    }
+    let (issuer_raw, _) = tlv_both(&mut tr)?;
+    if issuer_raw[0] != 0x30 {
+        return None;
+    }
     let validity = tr.next(0x30)?;
     let mut vr = Reader::new(validity);
-    let nb = vr.tlv()?;
-    let na = vr.tlv()?;
-    let not_before = parse_time(nb.0, nb.1)?;
-    let not_after = parse_time(na.0, na.1)?;
-    tr.next(0x30)?;
+    let not_before = parse_time(vr.tlv()?)?;
+    let not_after = parse_time(vr.tlv()?)?;
+    let (subject_raw, _) = tlv_both(&mut tr)?;
+    if subject_raw[0] != 0x30 {
+        return None;
+    }
     let spki = tr.next(0x30)?;
     let mut sr = Reader::new(spki);
     let alg = sr.next(0x30)?;
@@ -58,31 +135,56 @@ pub fn parse(der: &[u8]) -> Option<Cert> {
         }
     } else if oid == der::OID_EC {
         let params = ar.next(0x06)?;
-        if params != der::OID_P256 || keybits.len() != 65 || keybits[0] != 0x04 {
+        if params == der::OID_P256 {
+            if keybits.len() != 65 || keybits[0] != 0x04 {
+                return None;
+            }
+            PubKey::EcP256 {
+                x: keybits[1..33].to_vec(),
+                y: keybits[33..65].to_vec(),
+            }
+        } else if params == der::OID_P384 {
+            if keybits.len() != 97 || keybits[0] != 0x04 {
+                return None;
+            }
+            PubKey::EcP384 {
+                x: keybits[1..49].to_vec(),
+                y: keybits[49..97].to_vec(),
+            }
+        } else {
             return None;
-        }
-        PubKey::EcP256 {
-            x: keybits[1..33].to_vec(),
-            y: keybits[33..65].to_vec(),
         }
     } else {
         return None;
     };
+    while matches!(tr.rest().first(), Some(&0xa1) | Some(&0xa2)) {
+        tr.tlv()?;
+    }
     let mut dns_names = Vec::new();
+    let mut ca = false;
+    let mut path_len = None;
+    let mut key_cert_sign = true;
     if tr.rest().first() == Some(&0xa3) {
-        if let Some(exts) = tr.tlv() {
-            let mut er = Reader::new(exts.1);
-            if let Some(seq) = er.next(0x30) {
-                let mut sr = Reader::new(seq);
-                while let Some((_, ext)) = sr.tlv() {
-                    let mut xr = Reader::new(ext);
-                    let id = xr.next(0x06)?;
-                    if id != der::OID_SAN {
-                        continue;
-                    }
-                    let val = xr.next(0x04)?;
-                    let mut vr = Reader::new(val);
-                    let names = vr.next(0x30)?;
+        let exts = tr.tlv()?.1;
+        let mut er = Reader::new(exts);
+        let seq = er.next(0x30)?;
+        let mut sr = Reader::new(seq);
+        while let Some((_, ext)) = sr.tlv() {
+            let mut xr = Reader::new(ext);
+            let id = match xr.next(0x06) {
+                Some(id) => id,
+                None => continue,
+            };
+            if xr.rest().first() == Some(&0x01) {
+                let _ = xr.tlv();
+            }
+            let val = match xr.next(0x04) {
+                Some(v) => v,
+                None => continue,
+            };
+            if id == der::OID_SAN {
+                let mut vr = Reader::new(val);
+                if let Some(names) = vr.next(0x30) {
                     let mut nr = Reader::new(names);
                     while let Some((tag, name)) = nr.tlv() {
                         match tag {
@@ -101,14 +203,54 @@ pub fn parse(der: &[u8]) -> Option<Cert> {
                         }
                     }
                 }
+            } else if id == der::OID_BASIC_CONSTRAINTS {
+                let mut vr = Reader::new(val);
+                if let Some(seq) = vr.next(0x30) {
+                    let mut br = Reader::new(seq);
+                    if let Some((tag, flag)) = br.tlv() {
+                        if tag == 0x01 {
+                            ca = flag.first().map(|b| *b != 0).unwrap_or(false);
+                            if let Some((tag, n)) = br.tlv() {
+                                if tag == 0x02 {
+                                    let b = der::int_bytes(n);
+                                    if !b.is_empty() && b.len() <= 4 {
+                                        path_len = Some(be_u32(b));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } else if id == der::OID_KEY_USAGE {
+                let mut vr = Reader::new(val);
+                if let Some(bits) = vr.next(0x03).and_then(unpack_bits) {
+                    if !bits.is_empty() {
+                        key_cert_sign = (bits[0] >> 2) & 1 == 1;
+                    }
+                }
             }
         }
     }
+    let (outer_alg_raw, outer_alg) = tlv_both(&mut cr)?;
+    if outer_alg_raw[0] != 0x30 || outer_alg_raw != inner_alg_raw {
+        return None;
+    }
+    let sig_alg = parse_sig_alg(outer_alg)?;
+    let sig_bits = cr.next(0x03)?;
+    let sig = unpack_bits(sig_bits)?.to_vec();
     Some(Cert {
         key,
         not_before,
         not_after,
         dns_names,
+        subject: subject_raw.to_vec(),
+        issuer: issuer_raw.to_vec(),
+        tbs: tbs_raw.to_vec(),
+        sig_alg,
+        sig,
+        ca,
+        path_len,
+        key_cert_sign,
     })
 }
 
@@ -123,7 +265,8 @@ fn unpack_bits(b: &[u8]) -> Option<&[u8]> {
     Some(&b[1..])
 }
 
-fn parse_time(tag: u8, b: &[u8]) -> Option<i64> {
+fn parse_time(tagged: (u8, &[u8])) -> Option<i64> {
+    let (tag, b) = tagged;
     let (year, rest) = match tag {
         0x17 if b.len() == 13 => {
             let y = (b[0] - b'0') as i64 * 10 + (b[1] - b'0') as i64;
@@ -189,7 +332,8 @@ pub fn host_matches(dns: &[String], host: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{days_from_civil, host_matches};
+    use super::{days_from_civil, host_matches, parse_sig_alg, SigAlg};
+    use crate::der::{OID_ECDSA_SHA256, OID_RSA_PSS, OID_SHA2_256, OID_SHA256_RSA};
 
     fn names(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
@@ -232,5 +376,37 @@ mod tests {
         assert_eq!(days_from_civil(1970, 1, 1), 0);
         assert_eq!(days_from_civil(2000, 3, 1), 11017);
         assert_eq!(days_from_civil(2026, 1, 1), 20454);
+    }
+
+    #[test]
+    fn sig_alg_oids() {
+        let sha256_rsa = [0x06u8, 0x09]
+            .iter()
+            .copied()
+            .chain(OID_SHA256_RSA.iter().copied())
+            .chain([0x05, 0x00])
+            .collect::<Vec<u8>>();
+        assert_eq!(parse_sig_alg(&sha256_rsa), Some(SigAlg::RsaPkcs1Sha256));
+        let ecdsa = [0x06u8, 0x08]
+            .iter()
+            .copied()
+            .chain(OID_ECDSA_SHA256.iter().copied())
+            .collect::<Vec<u8>>();
+        assert_eq!(parse_sig_alg(&ecdsa), Some(SigAlg::EcdsaSha256));
+        let pss_sha1 = [0x06u8, 0x09]
+            .iter()
+            .copied()
+            .chain(OID_RSA_PSS.iter().copied())
+            .collect::<Vec<u8>>();
+        assert_eq!(parse_sig_alg(&pss_sha1), Some(SigAlg::Other));
+        let pss_sha256 = [0x06u8, 0x09]
+            .iter()
+            .copied()
+            .chain(OID_RSA_PSS.iter().copied())
+            .chain([0x30u8, 0x0b, 0x06, 0x09])
+            .chain(OID_SHA2_256.iter().copied())
+            .collect::<Vec<u8>>();
+        assert_eq!(parse_sig_alg(&pss_sha256), Some(SigAlg::RsaPssSha256));
+        assert_eq!(parse_sig_alg(&[]), None);
     }
 }
