@@ -9,12 +9,16 @@ A browser engine in Rust. Educational, experimental.
 ## Usage
 
 ```sh
-cargo run -- page.html [style.css] [width] [out.png]
+cargo run -- page.html [style.css] [width] [out.png] [sel]
+cargo run -- page.html base.css target.css width out.png [seconds]
 cargo run -- fetch http://example.com [width] [out.png]
 ```
 
 Prints the DOM tree, the styled tree with cascaded properties and the box
-layout. With an output path it also paints the page to a PNG.
+layout. With an output path it also paints the page to a PNG. The `sel`
+flag renders with every text run selected, applying `::selection` styles.
+With two stylesheets it renders the interpolated state between them at the
+given time in seconds, honoring `transition` on either side.
 
 ## Architecture
 
@@ -78,6 +82,11 @@ Workspace of small crates:
 - [x] Box shadow
 - [x] Pseudo elements
 - [x] Relative stacking contexts
+- [x] Text shadow
+- [x] Radial gradient
+- [x] First letter
+- [x] Selection
+- [x] Transitions
 
 ## License
 
