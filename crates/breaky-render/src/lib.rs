@@ -176,7 +176,7 @@ pub fn paint_with(root: &LayoutBox, viewport_width: f32, imgs: &img::Store) -> C
         .ceil()
         .max(1.0)) as u32;
     let mut canvas = Canvas::new(viewport_width.max(1.0) as u32, height);
-    if let Some(c) = computed(root).and_then(|m| token_color(m, "background-color")) {
+    if let Some(c) = computed(root).and_then(bg_color) {
         canvas.fill(
             Rect {
                 x: 0.0,
@@ -410,7 +410,7 @@ fn text_metrics(map: Option<&std::collections::HashMap<String, Vec<Value>>>) -> 
 fn paint_bg(canvas: &mut Canvas, b: &LayoutBox, imgs: &img::Store) {
     let d = &b.dims;
     let bb = d.border_box();
-    if let Some(c) = computed(b).and_then(|m| token_color(m, "background-color")) {
+    if let Some(c) = computed(b).and_then(bg_color) {
         canvas.fill(bb, c);
     }
     if let Some(m) = computed(b) {
@@ -614,6 +614,19 @@ fn bg_url(m: &std::collections::HashMap<String, Vec<Value>>) -> Option<String> {
     };
     if let Some(u) = m.get("background-image").and_then(|v| pick(v)) {
         return Some(u);
+    }
+    m.get("background").and_then(|v| pick(v))
+}
+
+fn bg_color(m: &std::collections::HashMap<String, Vec<Value>>) -> Option<Color> {
+    let pick = |vals: &[Value]| {
+        vals.iter().find_map(|v| match v {
+            Value::Color(c) => Some(*c),
+            _ => None,
+        })
+    };
+    if let Some(c) = m.get("background-color").and_then(|v| pick(v)) {
+        return Some(c);
     }
     m.get("background").and_then(|v| pick(v))
 }
@@ -1475,6 +1488,23 @@ mod tests {
         let canvas = paint_with(&tree, 100.0, &imgs);
         assert_eq!(canvas.pixel(16, 14), [255, 0, 0]);
         assert_eq!(canvas.pixel(16, 13), [255, 255, 255]);
+    }
+
+    #[test]
+    fn background_shorthand_color() {
+        let dom = parse_html("<html><div></div></html>");
+        let sheet = parse_css("div { background: #0000ff; width: 20px; height: 10px }");
+        let styled = style_build(&dom, &sheet);
+        let tree = layout(&styled, 100.0).unwrap();
+        let canvas = paint(&tree, 100.0);
+        assert_eq!(canvas.pixel(5, 5), [0, 0, 255]);
+        assert_eq!(canvas.pixel(25, 5), [255, 255, 255]);
+        let dom = parse_html("<html><div></div></html>");
+        let sheet = parse_css("div { background: red; width: 20px; height: 10px }");
+        let styled = style_build(&dom, &sheet);
+        let tree = layout(&styled, 100.0).unwrap();
+        let canvas = paint(&tree, 100.0);
+        assert_eq!(canvas.pixel(5, 5), [255, 0, 0]);
     }
 
     fn find_box<'a>(b: &'a LayoutBox<'a>, name: &str) -> Option<&'a LayoutBox<'a>> {
