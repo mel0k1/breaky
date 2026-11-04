@@ -16,6 +16,7 @@ members = [
     "crates/breaky-render",
     "crates/breaky-font",
     "crates/breaky-net",
+    "crates/breaky-tls",
 ]
 
 [dependencies]

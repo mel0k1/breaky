@@ -46,6 +46,9 @@ dependencies = [
 [[package]]
 name = "breaky-net"
 version = "0.1.0"
+dependencies = [
+ "breaky-tls",
+]
 
 [[package]]
 name = "breaky-render"
@@ -66,3 +69,7 @@ dependencies = [
  "breaky-css",
  "breaky-html",
 ]
+
+[[package]]
+name = "breaky-tls"
+version = "0.1.0"
