@@ -19,6 +19,25 @@ pub enum Value {
     Length(f32, Unit),
     Color(Color),
     Url(String),
+    Gradient(Gradient),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Gradient {
+    pub dir: Dir,
+    pub stops: Vec<(Color, Option<Stop>)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Dir {
+    Angle(f32),
+    Corner(i8, i8),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Stop {
+    Pct(f32),
+    Px(f32),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -48,7 +67,31 @@ impl fmt::Display for Value {
             Value::Length(n, u) => write!(f, "{}{}", n, u),
             Value::Color(c) => write!(f, "{}", c),
             Value::Url(u) => write!(f, "url({})", u),
+            Value::Gradient(g) => write!(f, "{}", g),
         }
+    }
+}
+
+impl fmt::Display for Gradient {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.dir {
+            Dir::Angle(a) => write!(f, "linear-gradient({}deg", a.round()),
+            Dir::Corner(x, y) => write!(
+                f,
+                "linear-gradient(to {}{}",
+                if y < 0 { "top" } else if y > 0 { "bottom" } else { "" },
+                if x < 0 { " left" } else if x > 0 { " right" } else { "" }
+            ),
+        }?;
+        for (c, p) in &self.stops {
+            write!(f, ", {}", c)?;
+            match p {
+                Some(Stop::Pct(v)) => write!(f, " {}%", v)?,
+                Some(Stop::Px(v)) => write!(f, " {}px", v)?,
+                None => {}
+            }
+        }
+        write!(f, ")")
     }
 }
 
@@ -303,7 +346,118 @@ fn token(t: &str) -> Value {
     if let Some(u) = url(t) {
         return Value::Url(u);
     }
+    if let Some(g) = gradient(t) {
+        return Value::Gradient(g);
+    }
     Value::Keyword(t.to_lowercase())
+}
+
+fn gradient(t: &str) -> Option<Gradient> {
+    let low = t.to_lowercase();
+    let inner = low.strip_prefix("linear-gradient(")?.strip_suffix(')')?;
+    let parts = split_commas(inner);
+    if parts.is_empty() {
+        return None;
+    }
+    let (dir, rest) = match side_dir(parts[0].trim()) {
+        Some(d) => (d, &parts[1..]),
+        None => (Dir::Angle(180.0), &parts[..]),
+    };
+    if rest.is_empty() {
+        return None;
+    }
+    let mut stops = Vec::new();
+    for p in rest {
+        let toks = split_top(p);
+        if toks.is_empty() {
+            continue;
+        }
+        let c = color(&toks[0])?;
+        let pos = toks.get(1).and_then(|t| stop_pos(t));
+        stops.push((c, pos));
+    }
+    if stops.len() < 2 {
+        return None;
+    }
+    Some(Gradient { dir, stops })
+}
+
+fn side_dir(s: &str) -> Option<Dir> {
+    if let Some(d) = s.strip_suffix("deg") {
+        return d.trim().parse::<f32>().ok().map(Dir::Angle);
+    }
+    let toks: Vec<&str> = s.split_whitespace().collect();
+    if toks.first() != Some(&"to") {
+        return None;
+    }
+    let mut sx = 0i8;
+    let mut sy = 0i8;
+    for t in &toks[1..] {
+        match *t {
+            "top" => sy = -1,
+            "bottom" => sy = 1,
+            "left" => sx = -1,
+            "right" => sx = 1,
+            _ => return None,
+        }
+    }
+    match (sx, sy) {
+        (0, 0) => None,
+        (0, -1) => Some(Dir::Angle(0.0)),
+        (0, 1) => Some(Dir::Angle(180.0)),
+        (-1, 0) => Some(Dir::Angle(270.0)),
+        (1, 0) => Some(Dir::Angle(90.0)),
+        (x, y) => Some(Dir::Corner(x, y)),
+    }
+}
+
+fn stop_pos(t: &str) -> Option<Stop> {
+    if let Some(p) = t.strip_suffix('%') {
+        return p.trim().parse::<f32>().ok().map(Stop::Pct);
+    }
+    if let Some(n) = t.strip_suffix("px") {
+        return n.trim().parse::<f32>().ok().map(Stop::Px);
+    }
+    None
+}
+
+fn split_commas(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut depth = 0;
+    let mut quote: Option<char> = None;
+    for ch in s.chars() {
+        match quote {
+            Some(q) => {
+                cur.push(ch);
+                if ch == q {
+                    quote = None;
+                }
+            }
+            None => match ch {
+                '"' | '\'' => {
+                    quote = Some(ch);
+                    cur.push(ch);
+                }
+                '(' => {
+                    depth += 1;
+                    cur.push(ch);
+                }
+                ')' => {
+                    depth -= 1;
+                    cur.push(ch);
+                }
+                ',' if depth == 0 => {
+                    out.push(std::mem::take(&mut cur));
+                }
+                _ => cur.push(ch),
+            },
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out.into_iter().map(|s| s.trim().to_string()).collect()
 }
 
 fn url(t: &str) -> Option<String> {
@@ -742,5 +896,68 @@ mod tests {
             sheet.rules[0].declarations[0].value,
             vec![Value::Url("dot.png".into())]
         );
+    }
+
+    fn grad(v: Value) -> Gradient {
+        match v {
+            Value::Gradient(g) => g,
+            _ => panic!("not a gradient"),
+        }
+    }
+
+    #[test]
+    fn gradient_default_direction() {
+        let v = parse_value("linear-gradient(red, blue)");
+        let g = grad(v.into_iter().next().unwrap());
+        assert_eq!(g.dir, Dir::Angle(180.0));
+        assert_eq!(
+            g.stops,
+            vec![
+                (Color { r: 255, g: 0, b: 0, a: 255 }, None),
+                (Color { r: 0, g: 0, b: 255, a: 255 }, None),
+            ]
+        );
+    }
+
+    #[test]
+    fn gradient_angle_and_positions() {
+        let v = parse_value("linear-gradient(45deg, #ff0000 0%, rgba(0, 0, 255, 0.5) 100%)");
+        let g = grad(v.into_iter().next().unwrap());
+        assert_eq!(g.dir, Dir::Angle(45.0));
+        assert_eq!(g.stops[0], (Color { r: 255, g: 0, b: 0, a: 255 }, Some(Stop::Pct(0.0))));
+        assert_eq!(g.stops[1], (Color { r: 0, g: 0, b: 255, a: 128 }, Some(Stop::Pct(100.0))));
+    }
+
+    #[test]
+    fn gradient_side_and_corner() {
+        let v = parse_value("linear-gradient(to right, red, blue)");
+        assert_eq!(grad(v.into_iter().next().unwrap()).dir, Dir::Angle(90.0));
+        let v = parse_value("linear-gradient(to left top, red, blue)");
+        assert_eq!(grad(v.into_iter().next().unwrap()).dir, Dir::Corner(-1, -1));
+        let v = parse_value("linear-gradient(to bottom right, red, blue)");
+        assert_eq!(grad(v.into_iter().next().unwrap()).dir, Dir::Corner(1, 1));
+    }
+
+    #[test]
+    fn gradient_px_stops() {
+        let v = parse_value("linear-gradient(90deg, red 10px, blue 40px)");
+        let g = grad(v.into_iter().next().unwrap());
+        assert_eq!(g.stops[0].1, Some(Stop::Px(10.0)));
+        assert_eq!(g.stops[1].1, Some(Stop::Px(40.0)));
+    }
+
+    #[test]
+    fn gradient_display() {
+        let v = parse_value("linear-gradient(to right, red, blue 50%)");
+        assert_eq!(
+            v[0].to_string(),
+            "linear-gradient(90deg, #ff0000, #0000ff 50%)"
+        );
+    }
+
+    #[test]
+    fn gradient_rejects_single_stop() {
+        let v = parse_value("linear-gradient(red)");
+        assert_eq!(v, vec![Value::Keyword("linear-gradient(red)".into())]);
     }
 }

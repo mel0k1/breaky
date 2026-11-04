@@ -1,4 +1,4 @@
-use css::{Color, Unit, Value};
+use css::{Color, Dir, Gradient, Stop, Unit, Value};
 use img::Image;
 use layout::{BoxKind, LayoutBox, Rect};
 
@@ -107,6 +107,53 @@ impl Canvas {
             self.pixels[i + k] = v.round() as u8;
         }
         self.pixels[i + 3] = (oa * 255.0).round() as u8;
+    }
+
+    fn fill_gradient(&mut self, r: Rect, g: &Gradient) {
+        let w = r.width;
+        let h = r.height;
+        if w <= 0.0 || h <= 0.0 || g.stops.is_empty() {
+            return;
+        }
+        let (ux, uy) = match g.dir {
+            Dir::Angle(a) => {
+                let rad = a.to_radians();
+                (rad.sin(), -rad.cos())
+            }
+            Dir::Corner(sx, sy) => {
+                let (mut vx, mut vy) = (-(sy as f32) * h, -(sx as f32) * w);
+                if vx * (sx as f32) + vy * (sy as f32) < 0.0 {
+                    vx = -vx;
+                    vy = -vy;
+                }
+                (vx, vy)
+            }
+        };
+        let n = (ux * ux + uy * uy).sqrt();
+        if n <= 0.0 {
+            return;
+        }
+        let (ux, uy) = (ux / n, uy / n);
+        let len = w * ux.abs() + h * uy.abs();
+        if len <= 0.0 {
+            return;
+        }
+        let stops = resolve_stops(&g.stops, len);
+        let cx = r.x + w / 2.0;
+        let cy = r.y + h / 2.0;
+        let x0 = r.x.floor().max(0.0) as i64;
+        let y0 = r.y.floor().max(0.0) as i64;
+        let x1 = ((r.x + w).ceil().min(self.width as f32)) as i64;
+        let y1 = ((r.y + h).ceil().min(self.height as f32)) as i64;
+        for y in y0..y1 {
+            let py = y as f32 + 0.5 - cy;
+            for x in x0..x1 {
+                let px = x as f32 + 0.5 - cx;
+                let t = (px * ux + py * uy + len / 2.0).clamp(0.0, len);
+                let c = stop_color(&stops, t);
+                self.blend(x, y, c);
+            }
+        }
     }
 
     fn composite(&mut self, other: &Canvas, alpha: f32) {
@@ -541,6 +588,9 @@ fn paint_bg(canvas: &mut Canvas, b: &LayoutBox, imgs: &img::Store) {
         canvas.fill(bb, c);
     }
     if let Some(m) = computed(b) {
+        if let Some(g) = bg_gradient(m) {
+            canvas.fill_gradient(bb, &g);
+        }
         if let Some(u) = bg_url(m) {
             if let Some(im) = imgs.get(&u) {
                 let pb = d.padding_box();
@@ -756,6 +806,94 @@ fn bg_color(m: &std::collections::HashMap<String, Vec<Value>>) -> Option<Color> 
         return Some(c);
     }
     m.get("background").and_then(|v| pick(v))
+}
+
+fn bg_gradient(m: &std::collections::HashMap<String, Vec<Value>>) -> Option<Gradient> {
+    let pick = |vals: &[Value]| {
+        vals.iter().find_map(|v| match v {
+            Value::Gradient(g) => Some(g.clone()),
+            _ => None,
+        })
+    };
+    if let Some(g) = m.get("background-image").and_then(|v| pick(v)) {
+        return Some(g);
+    }
+    m.get("background").and_then(|v| pick(v))
+}
+
+fn resolve_stops(stops: &[(Color, Option<Stop>)], len: f32) -> Vec<(Color, f32)> {
+    let mut out: Vec<(Color, f32)> = stops
+        .iter()
+        .map(|(c, p)| {
+            let pos = match p {
+                Some(Stop::Pct(v)) => v / 100.0 * len,
+                Some(Stop::Px(n)) => *n,
+                None => f32::NAN,
+            };
+            (*c, pos)
+        })
+        .collect();
+    if out.is_empty() {
+        return out;
+    }
+    let n = out.len();
+    if out[0].1.is_nan() {
+        out[0].1 = 0.0;
+    }
+    if out[n - 1].1.is_nan() {
+        out[n - 1].1 = len;
+    }
+    let mut i = 1usize;
+    while i < n {
+        if !out[i].1.is_nan() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < n && out[i].1.is_nan() {
+            i += 1;
+        }
+        let a = out[start - 1].1;
+        let b = if i < n { out[i].1 } else { len };
+        let k = (i - start + 1) as f32;
+        for m in start..i {
+            out[m].1 = a + (b - a) * ((m - start + 1) as f32) / k;
+        }
+    }
+    let mut prev = 0.0f32;
+    for e in out.iter_mut() {
+        e.1 = e.1.max(prev);
+        prev = e.1;
+    }
+    out
+}
+
+fn stop_color(stops: &[(Color, f32)], t: f32) -> Color {
+    if t <= stops[0].1 {
+        return stops[0].0;
+    }
+    let last = stops[stops.len() - 1];
+    if t >= last.1 {
+        return last.0;
+    }
+    for w in stops.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        if t >= a.1 && t <= b.1 {
+            let k = if b.1 > a.1 {
+                (t - a.1) / (b.1 - a.1)
+            } else {
+                1.0
+            };
+            let mix = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * k).round() as u8;
+            return Color {
+                r: mix(a.0.r, b.0.r),
+                g: mix(a.0.g, b.0.g),
+                b: mix(a.0.b, b.0.b),
+                a: mix(a.0.a, b.0.a),
+            };
+        }
+    }
+    last.0
 }
 
 fn bg_repeat(m: &std::collections::HashMap<String, Vec<Value>>) -> Repeat {
@@ -1864,5 +2002,80 @@ mod tests {
             }
         }
         out
+    }
+
+    fn near(p: [u8; 3], r: u8, g: u8, b: u8) -> bool {
+        (p[0] as i32 - r as i32).abs() <= 5
+            && (p[1] as i32 - g as i32).abs() <= 5
+            && (p[2] as i32 - b as i32).abs() <= 5
+    }
+
+    #[test]
+    fn gradient_to_right() {
+        let dom = parse_html("<html><div></div></html>");
+        let sheet = parse_css(
+            "div { width: 100px; height: 20px; background-image: linear-gradient(to right, #ff0000, #0000ff) }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let tree = layout(&styled, 100.0).unwrap();
+        let canvas = paint(&tree, 100.0);
+        assert!(near(canvas.pixel(1, 10), 255, 0, 0));
+        assert!(near(canvas.pixel(98, 10), 0, 0, 255));
+        let mid = canvas.pixel(50, 10);
+        assert!(near(mid, 128, 0, 127) || near(mid, 127, 0, 128));
+    }
+
+    #[test]
+    fn gradient_default_bottom() {
+        let dom = parse_html("<html><div></div></html>");
+        let sheet = parse_css(
+            "div { width: 50px; height: 100px; background-image: linear-gradient(#ff0000, #0000ff) }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let tree = layout(&styled, 100.0).unwrap();
+        let canvas = paint(&tree, 100.0);
+        assert!(near(canvas.pixel(25, 1), 255, 0, 0));
+        assert!(near(canvas.pixel(25, 98), 0, 0, 255));
+        assert!(near(canvas.pixel(1, 50), 127, 0, 128));
+    }
+
+    #[test]
+    fn gradient_shorthand_and_stops() {
+        let dom = parse_html("<html><div></div></html>");
+        let sheet = parse_css(
+            "div { width: 100px; height: 10px; background: linear-gradient(to right, #ff0000 50%, #0000ff 50%) }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let tree = layout(&styled, 100.0).unwrap();
+        let canvas = paint(&tree, 100.0);
+        assert!(near(canvas.pixel(10, 5), 255, 0, 0));
+        assert!(near(canvas.pixel(90, 5), 0, 0, 255));
+        assert!(near(canvas.pixel(51, 5), 0, 0, 255));
+    }
+
+    #[test]
+    fn gradient_corner_direction() {
+        let dom = parse_html("<html><div></div></html>");
+        let sheet = parse_css(
+            "div { width: 100px; height: 100px; background-image: linear-gradient(to top right, #ff0000, #0000ff) }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let tree = layout(&styled, 100.0).unwrap();
+        let canvas = paint(&tree, 100.0);
+        assert!(near(canvas.pixel(0, 99), 255, 0, 0));
+        assert!(near(canvas.pixel(99, 0), 0, 0, 255));
+    }
+
+    #[test]
+    fn gradient_over_color_and_alpha_stop() {
+        let dom = parse_html("<html><div></div></html>");
+        let sheet = parse_css(
+            "html { background-color: #0000ff } div { width: 100px; height: 10px; background-image: linear-gradient(to right, rgba(255, 0, 0, 0) 0%, rgba(255, 0, 0, 1) 100%) }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let tree = layout(&styled, 100.0).unwrap();
+        let canvas = paint(&tree, 100.0);
+        assert!(near(canvas.pixel(0, 5), 0, 0, 255));
+        assert!(near(canvas.pixel(99, 5), 255, 0, 0));
     }
 }
