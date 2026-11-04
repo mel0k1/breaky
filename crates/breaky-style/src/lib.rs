@@ -156,6 +156,9 @@ fn build_rec<'a>(
         if let Some(a) = pseudo_node(node, sheet, ancestors, &computed, font, "after") {
             children.push(a);
         }
+        if block_container(node, &computed) {
+            apply_first_letter(node, sheet, ancestors, font, &mut children);
+        }
     }
     StyledNode {
         node,
@@ -173,14 +176,12 @@ fn pseudo_of(s: &Selector) -> Option<&str> {
     }
 }
 
-fn pseudo_node<'a>(
+fn pseudo_rules<'a>(
     node: &'a Node,
-    sheet: &Stylesheet,
+    sheet: &'a Stylesheet,
     ancestors: &[&'a Node],
-    parent: &HashMap<String, Vec<Value>>,
-    parent_font: f32,
-    kind: &'static str,
-) -> Option<StyledNode<'a>> {
+    kind: &str,
+) -> Option<Vec<&'a css::Declaration>> {
     let mut matched: Vec<((usize, usize, usize), usize, &Rule)> = Vec::new();
     for (i, rule) in sheet.rules.iter().enumerate() {
         let spec = rule
@@ -210,11 +211,26 @@ fn pseudo_node<'a>(
         return None;
     }
     matched.sort_by_key(|(spec, i, _)| (*spec, *i));
+    Some(
+        matched
+            .iter()
+            .flat_map(|(_, _, r)| r.declarations.iter())
+            .collect(),
+    )
+}
+
+fn pseudo_node<'a>(
+    node: &'a Node,
+    sheet: &Stylesheet,
+    ancestors: &[&'a Node],
+    parent: &HashMap<String, Vec<Value>>,
+    parent_font: f32,
+    kind: &'static str,
+) -> Option<StyledNode<'a>> {
+    let decls = pseudo_rules(node, sheet, ancestors, kind)?;
     let mut computed = HashMap::new();
-    for (_, _, rule) in &matched {
-        for d in &rule.declarations {
-            computed.insert(d.name.clone(), d.value.clone());
-        }
+    for d in &decls {
+        computed.insert(d.name.clone(), d.value.clone());
     }
     for key in INHERITED {
         if !computed.contains_key(key) {
@@ -242,6 +258,99 @@ fn pseudo_node<'a>(
         children: Vec::new(),
         pseudo: Some((kind, content)),
     })
+}
+
+fn block_container(node: &Node, computed: &HashMap<String, Vec<Value>>) -> bool {
+    let d = match computed.get("display").and_then(|v| v.first()) {
+        Some(Value::Keyword(k)) => k.clone(),
+        _ => match node.name() {
+            Some("a" | "b" | "i" | "s" | "u" | "em" | "strong" | "span" | "code"
+            | "small" | "sub" | "sup" | "label" | "br" | "img") => "inline".to_string(),
+            Some("head" | "title" | "meta" | "link" | "style" | "script" | "noscript"
+            | "template" | "col" | "colgroup") => "none".to_string(),
+            Some("table") => "table".to_string(),
+            Some("tr") => "table-row".to_string(),
+            Some("td" | "th") => "table-cell".to_string(),
+            Some("thead" | "tbody" | "tfoot") => "table-row-group".to_string(),
+            Some("caption") => "table-caption".to_string(),
+            _ => "block".to_string(),
+        },
+    };
+    matches!(
+        d.as_str(),
+        "block"
+            | "list-item"
+            | "table-cell"
+            | "table-caption"
+            | "inline-block"
+            | "flex"
+            | "flow-root"
+            | "inline-flex"
+    )
+}
+
+fn apply_first_letter<'a>(
+    node: &'a Node,
+    sheet: &Stylesheet,
+    ancestors: &[&'a Node],
+    parent_font: f32,
+    children: &mut Vec<StyledNode<'a>>,
+) {
+    let decls = match pseudo_rules(node, sheet, ancestors, "first-letter") {
+        Some(d) => d,
+        None => return,
+    };
+    insert_letter(children, &decls, parent_font);
+}
+
+fn insert_letter<'a>(
+    children: &mut Vec<StyledNode<'a>>,
+    decls: &[&css::Declaration],
+    parent_font: f32,
+) -> bool {
+    for idx in 0..children.len() {
+        if children[idx].pseudo.is_some() {
+            continue;
+        }
+        match &children[idx].node.kind {
+            NodeKind::Text(src) => {
+                let (byte_i, ch) = match src.char_indices().find(|(_, c)| !c.is_whitespace()) {
+                    Some(p) => p,
+                    None => continue,
+                };
+                let letter = ch.to_string();
+                let rest = src[byte_i + ch.len_utf8()..].to_string();
+                let mut computed = children[idx].computed.clone();
+                for d in decls {
+                    computed.insert(d.name.clone(), d.value.clone());
+                }
+                let font = match computed.get("font-size").and_then(|v| v.first()) {
+                    Some(Value::Length(n, Unit::Px)) => *n,
+                    Some(Value::Length(n, Unit::Em)) => n * parent_font,
+                    _ => parent_font,
+                };
+                computed.insert(
+                    "font-size".to_string(),
+                    vec![Value::Length(font, Unit::Px)],
+                );
+                let letter_node = StyledNode {
+                    node: children[idx].node,
+                    computed,
+                    children: Vec::new(),
+                    pseudo: Some(("first-letter", letter)),
+                };
+                children[idx].pseudo = Some(("text", rest));
+                children.insert(idx, letter_node);
+                return true;
+            }
+            _ => {
+                if insert_letter(&mut children[idx].children, decls, parent_font) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 fn selector_matches(node: &Node, s: &Selector, ancestors: &[&Node]) -> bool {
@@ -492,5 +601,86 @@ mod tests {
             el(el(el(&s, "div"), "section"), "p").computed["color"],
             vec![rgb(255, 0, 0)]
         );
+    }
+
+    #[test]
+    fn first_letter_extracts_and_rest() {
+        let dom = parse_html("<p>Hello</p>");
+        let sheet = parse_css("p::first-letter { font-size: 2em; color: red }");
+        let s = build(&dom, &sheet);
+        let p = el(&s, "p");
+        assert_eq!(p.children.len(), 2);
+        let l = &p.children[0];
+        assert_eq!(l.pseudo.as_ref().unwrap().0, "first-letter");
+        assert_eq!(l.pseudo.as_ref().unwrap().1, "H");
+        assert_eq!(l.computed["font-size"], vec![px(32.0)]);
+        assert_eq!(l.computed["color"], vec![rgb(255, 0, 0)]);
+        let rest = &p.children[1];
+        assert_eq!(rest.pseudo.as_ref().unwrap().0, "text");
+        assert_eq!(rest.pseudo.as_ref().unwrap().1, "ello");
+        assert_eq!(rest.computed["font-size"], vec![px(16.0)]);
+    }
+
+    #[test]
+    fn first_letter_inside_inline_child() {
+        let dom = parse_html("<p><b>Hi</b></p>");
+        let sheet = parse_css("p::first-letter { color: red }");
+        let s = build(&dom, &sheet);
+        let b = el(el(&s, "p"), "b");
+        assert_eq!(b.children.len(), 2);
+        assert_eq!(b.children[0].pseudo.as_ref().unwrap(), &("first-letter", "H".to_string()));
+        assert_eq!(b.children[1].pseudo.as_ref().unwrap(), &("text", "i".to_string()));
+    }
+
+    #[test]
+    fn first_letter_skips_whitespace_and_elements() {
+        let dom = parse_html("<p><img src=\"x.png\"> Hi</p>");
+        let sheet = parse_css("p::first-letter { color: red }");
+        let s = build(&dom, &sheet);
+        let p = el(&s, "p");
+        let rest = p.children.iter().find(|c| c.pseudo.as_ref().map(|p| p.0) == Some("text")).unwrap();
+        assert_eq!(rest.pseudo.as_ref().unwrap().1, "i");
+    }
+
+    #[test]
+    fn first_letter_needs_block_container() {
+        let dom = parse_html("<p>hi <b>bold</b></p>");
+        let sheet = parse_css("b::first-letter { color: red }");
+        let s = build(&dom, &sheet);
+        let p = el(&s, "p");
+        let b = el(p, "b");
+        assert_eq!(b.children.len(), 1);
+        assert!(b.children[0].pseudo.is_none());
+    }
+
+    #[test]
+    fn first_letter_no_match_untouched() {
+        let dom = parse_html("<p>Hello</p>");
+        let sheet = parse_css("div::first-letter { color: red }");
+        let s = build(&dom, &sheet);
+        let p = el(&s, "p");
+        assert_eq!(p.children.len(), 1);
+        assert!(p.children[0].pseudo.is_none());
+    }
+
+    #[test]
+    fn first_letter_single_char_rest_empty() {
+        let dom = parse_html("<p>A</p>");
+        let sheet = parse_css("p::first-letter { color: red }");
+        let s = build(&dom, &sheet);
+        let p = el(&s, "p");
+        assert_eq!(p.children[0].pseudo.as_ref().unwrap().1, "A");
+        assert_eq!(p.children[1].pseudo.as_ref().unwrap().1, "");
+    }
+
+    #[test]
+    fn first_letter_cascade_specificity() {
+        let dom = parse_html("<p class=\"a\">Hi</p>");
+        let sheet = parse_css(
+            "p::first-letter { color: red } .a::first-letter { color: blue }",
+        );
+        let s = build(&dom, &sheet);
+        let p = el(&s, "p");
+        assert_eq!(p.children[0].computed["color"], vec![rgb(0, 0, 255)]);
     }
 }
