@@ -198,10 +198,14 @@ fn print_styled(node: &StyledNode, depth: usize) {
             .iter()
             .map(|(k, v)| format!("{}={}", k, vals(v)))
             .collect();
+        let tag = match &node.pseudo {
+            Some((kind, _)) => format!("{}::{}", name, kind),
+            None => name.clone(),
+        };
         let head = if p.is_empty() {
-            format!("<{}>", name)
+            format!("<{}>", tag)
         } else {
-            format!("<{} {}>", name, p.join(" "))
+            format!("<{} {}>", tag, p.join(" "))
         };
         println!("{}{}", "  ".repeat(depth), head);
     }

@@ -25,6 +25,7 @@ pub struct StyledNode<'a> {
     pub node: &'a Node,
     pub computed: HashMap<String, Vec<Value>>,
     pub children: Vec<StyledNode<'a>>,
+    pub pseudo: Option<(&'static str, String)>,
 }
 
 pub fn build<'a>(node: &'a Node, sheet: &Stylesheet) -> StyledNode<'a> {
@@ -142,16 +143,104 @@ fn build_rec<'a>(
     }
     let mut chain: Vec<&Node> = ancestors.to_vec();
     chain.push(node);
-    let children = node
+    let mut children: Vec<StyledNode<'a>> = node
         .children
         .iter()
         .map(|c| build_rec(c, sheet, &chain, Some(&computed), font))
         .collect();
+    if matches!(node.kind, NodeKind::Element { .. }) {
+        if let Some(b) = pseudo_node(node, sheet, ancestors, &computed, font, "before") {
+            children.insert(0, b);
+        }
+        if let Some(a) = pseudo_node(node, sheet, ancestors, &computed, font, "after") {
+            children.push(a);
+        }
+    }
     StyledNode {
         node,
         computed,
         children,
+        pseudo: None,
     }
+}
+
+fn pseudo_of(s: &Selector) -> Option<&str> {
+    let last = s.compounds.last()?.last()?;
+    match last {
+        SimpleSelector::Pseudo(p) => Some(p.as_str()),
+        _ => None,
+    }
+}
+
+fn pseudo_node<'a>(
+    node: &'a Node,
+    sheet: &Stylesheet,
+    ancestors: &[&'a Node],
+    parent: &HashMap<String, Vec<Value>>,
+    parent_font: f32,
+    kind: &'static str,
+) -> Option<StyledNode<'a>> {
+    let mut matched: Vec<((usize, usize, usize), usize, &Rule)> = Vec::new();
+    for (i, rule) in sheet.rules.iter().enumerate() {
+        let spec = rule
+            .selectors
+            .iter()
+            .filter(|s| pseudo_of(s) == Some(kind))
+            .filter(|s| {
+                let n = s.compounds.len();
+                let mut rest: Vec<Vec<SimpleSelector>> = s.compounds[..n - 1].to_vec();
+                let lastc: Vec<SimpleSelector> = s.compounds[n - 1]
+                    .iter()
+                    .filter(|p| !matches!(p, SimpleSelector::Pseudo(_)))
+                    .cloned()
+                    .collect();
+                if !lastc.is_empty() {
+                    rest.push(lastc);
+                }
+                rest.is_empty() || chain_matches(node, ancestors, &rest)
+            })
+            .map(|s| s.specificity())
+            .max();
+        if let Some(spec) = spec {
+            matched.push((spec, i, rule));
+        }
+    }
+    if matched.is_empty() {
+        return None;
+    }
+    matched.sort_by_key(|(spec, i, _)| (*spec, *i));
+    let mut computed = HashMap::new();
+    for (_, _, rule) in &matched {
+        for d in &rule.declarations {
+            computed.insert(d.name.clone(), d.value.clone());
+        }
+    }
+    for key in INHERITED {
+        if !computed.contains_key(key) {
+            if let Some(v) = parent.get(key) {
+                computed.insert(key.to_string(), v.clone());
+            }
+        }
+    }
+    let font = match computed.get("font-size").and_then(|v| v.first()) {
+        Some(Value::Length(n, Unit::Px)) => *n,
+        Some(Value::Length(n, Unit::Em)) => n * parent_font,
+        _ => parent_font,
+    };
+    computed.insert(
+        "font-size".to_string(),
+        vec![Value::Length(font, Unit::Px)],
+    );
+    let content = match computed.get("content").and_then(|v| v.first()) {
+        Some(Value::Keyword(k)) if !k.is_empty() && k != "none" && k != "normal" => k.clone(),
+        _ => return None,
+    };
+    Some(StyledNode {
+        node,
+        computed,
+        children: Vec::new(),
+        pseudo: Some((kind, content)),
+    })
 }
 
 fn selector_matches(node: &Node, s: &Selector, ancestors: &[&Node]) -> bool {
@@ -188,6 +277,7 @@ fn simple_matches(node: &Node, s: &SimpleSelector) -> bool {
         SimpleSelector::Class(c) => attr(node, "class")
             .map(|v| v.split_whitespace().any(|p| p == c))
             .unwrap_or(false),
+        SimpleSelector::Pseudo(_) => false,
     }
 }
 
@@ -330,6 +420,66 @@ mod tests {
         assert_eq!(p.computed["font-size"], vec![px(32.0)]);
         let b = el(p, "b");
         assert_eq!(b.computed["font-size"], vec![px(32.0)]);
+    }
+
+    #[test]
+    fn before_after_nodes() {
+        let dom = parse_html("<p>hi</p>");
+        let sheet = parse_css("p::before { content: \"<\" } p::after { content: \">!\" }");
+        let s = build(&dom, &sheet);
+        let p = el(&s, "p");
+        assert_eq!(p.children.len(), 3);
+        let b = &p.children[0];
+        assert_eq!(b.pseudo.as_ref().unwrap().0, "before");
+        assert_eq!(b.pseudo.as_ref().unwrap().1, "<");
+        assert!(p.children[1].pseudo.is_none());
+        assert_eq!(p.children[2].pseudo.as_ref().unwrap().0, "after");
+        assert_eq!(p.children[2].pseudo.as_ref().unwrap().1, ">!");
+    }
+
+    #[test]
+    fn pseudo_inherits_and_styles() {
+        let dom = parse_html("<p>hi</p>");
+        let sheet = parse_css(
+            "p { color: red; font-size: 10px } p::before { content: \"x\"; font-size: 2em }",
+        );
+        let s = build(&dom, &sheet);
+        let p = el(&s, "p");
+        let b = &p.children[0];
+        assert_eq!(b.computed["color"], vec![rgb(255, 0, 0)]);
+        assert_eq!(b.computed["font-size"], vec![px(20.0)]);
+        assert_eq!(p.computed["font-size"], vec![px(10.0)]);
+    }
+
+    #[test]
+    fn pseudo_without_content_skipped() {
+        let dom = parse_html("<p>hi</p>");
+        let sheet = parse_css("p::before { color: red } p::after { content: none }");
+        let s = build(&dom, &sheet);
+        assert_eq!(el(&s, "p").children.len(), 1);
+    }
+
+    #[test]
+    fn pseudo_scoped_to_matching() {
+        let dom = parse_html("<div><p>t</p></div>");
+        let sheet = parse_css("div::before { content: \"d\" } span::before { content: \"s\" }");
+        let s = build(&dom, &sheet);
+        let div = el(&s, "div");
+        assert_eq!(div.children.len(), 2);
+        assert_eq!(div.children[0].pseudo.as_ref().unwrap().1, "d");
+        assert_eq!(el(div, "p").children.len(), 1);
+    }
+
+    #[test]
+    fn pseudo_specificity_order() {
+        let dom = parse_html("<p class=\"a\">t</p>");
+        let sheet = parse_css(
+            "p::before { content: \"one\"; color: red } .a::before { content: \"two\"; color: blue }",
+        );
+        let s = build(&dom, &sheet);
+        let b = &el(&s, "p").children[0];
+        assert_eq!(b.pseudo.as_ref().unwrap().1, "two");
+        assert_eq!(b.computed["color"], vec![rgb(0, 0, 255)]);
     }
 
     #[test]

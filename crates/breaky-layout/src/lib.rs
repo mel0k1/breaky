@@ -259,6 +259,9 @@ fn build_node<'a>(
     inline_ctx: bool,
     imgs: &img::Store,
 ) -> (Vec<LayoutBox<'a>>, Vec<LayoutBox<'a>>) {
+    if let Some((_, content)) = &styled.pseudo {
+        return (text_boxes(styled, content.as_str()), Vec::new());
+    }
     match &styled.node.kind {
         NodeKind::Text(src) => (text_boxes(styled, src), Vec::new()),
         NodeKind::Element { .. } => {
@@ -3238,6 +3241,20 @@ mod tests {
             anon.children[0].dims.content.width,
             font::width("a  b", 16.0)
         ));
+    }
+
+    #[test]
+    fn pseudo_text_in_flow() {
+        let dom = parse_html("<html><p>hi</p></html>");
+        let sheet = parse_css("p::before { content: \"ab c\" }");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 100.0).unwrap();
+        let p = find(&root, "p");
+        let anon = &p.children[0];
+        assert_eq!(anon.children[0].text, Some("ab"));
+        assert_eq!(anon.children[1].text, Some(" "));
+        assert_eq!(anon.children[2].text, Some("c"));
+        assert_eq!(anon.children[3].text, Some("hi"));
     }
 
     #[test]

@@ -1,11 +1,12 @@
 use std::fmt;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum SimpleSelector {
     Universal,
     Tag(String),
     Id(String),
     Class(String),
+    Pseudo(String),
 }
 
 #[derive(Debug, PartialEq)]
@@ -134,6 +135,7 @@ impl Selector {
                     SimpleSelector::Id(_) => s.0 += 1,
                     SimpleSelector::Class(_) => s.1 += 1,
                     SimpleSelector::Tag(_) => s.2 += 1,
+                    SimpleSelector::Pseudo(_) => s.2 += 1,
                     SimpleSelector::Universal => {}
                 }
             }
@@ -269,6 +271,17 @@ fn compound(chars: &[char], i: &mut usize) -> Vec<SimpleSelector> {
                     });
                 }
             }
+            ':' => {
+                *i += 1;
+                if *i < chars.len() && chars[*i] == ':' {
+                    *i += 1;
+                }
+                let n = ident(chars, i);
+                if n.is_empty() {
+                    break;
+                }
+                out.push(SimpleSelector::Pseudo(n.to_lowercase()));
+            }
             '*' => {
                 *i += 1;
                 out.push(SimpleSelector::Universal);
@@ -325,7 +338,16 @@ fn declaration(chars: &[char], start: usize) -> (Option<Declaration>, usize) {
         }
     }
     let name = name.trim().to_lowercase();
-    let value = parse_value(&value);
+    let value = if name == "content" {
+        let v = value.trim().to_string();
+        if v.is_empty() {
+            Vec::new()
+        } else {
+            vec![Value::Keyword(v)]
+        }
+    } else {
+        parse_value(&value)
+    };
     if name.is_empty() || value.is_empty() {
         return (None, i);
     }
@@ -958,6 +980,42 @@ mod tests {
         assert_eq!(
             v[0].to_string(),
             "linear-gradient(90deg, #ff0000, #0000ff 50%)"
+        );
+    }
+
+    #[test]
+    fn pseudo_element_selectors() {
+        let sheet = parse("p::before { content: \"a b\" } p:after { content: 'x' }");
+        assert_eq!(sheet.rules.len(), 2);
+        assert_eq!(
+            sheet.rules[0].selectors[0].compounds,
+            vec![vec![
+                SimpleSelector::Tag("p".into()),
+                SimpleSelector::Pseudo("before".into())
+            ]]
+        );
+        assert_eq!(
+            sheet.rules[1].selectors[0].compounds[0][1],
+            SimpleSelector::Pseudo("after".into())
+        );
+        assert_eq!(
+            sheet.rules[0].declarations[0].value,
+            vec![Value::Keyword("a b".into())]
+        );
+        assert_eq!(
+            sheet.rules[1].declarations[0].value,
+            vec![Value::Keyword("x".into())]
+        );
+    }
+
+    #[test]
+    fn pseudo_specificity_and_content_none() {
+        let sheet = parse("p::before { color: red }");
+        assert_eq!(sheet.rules[0].selectors[0].specificity(), (0, 0, 2));
+        let d = declarations("q { content: none }");
+        assert_eq!(
+            d[0].value,
+            vec![Value::Keyword("none".into())]
         );
     }
 

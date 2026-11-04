@@ -2466,6 +2466,30 @@ mod tests {
     }
 
     #[test]
+    fn pseudo_before_paints_text() {
+        let dom = parse_html("<html><p></p></html>");
+        let sheet = parse_css("p::before { content: \"l\" }");
+        let styled = style_build(&dom, &sheet);
+        let tree = layout(&styled, 100.0).unwrap();
+        let canvas = paint(&tree, 100.0);
+        assert_eq!(canvas.pixel(0, 11), [0, 0, 0]);
+        assert_eq!(canvas.pixel(1, 5), [0, 0, 0]);
+    }
+
+    #[test]
+    fn pseudo_decorated_box() {
+        let dom = parse_html("<html><p>hi</p></html>");
+        let sheet = parse_css(
+            "p::before { content: \"AAAA\"; background-color: #0000ff } p { width: 100px; height: 40px }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let tree = layout(&styled, 100.0).unwrap();
+        let canvas = paint(&tree, 100.0);
+        assert_eq!(canvas.pixel(0, 0), [0, 0, 255]);
+        assert_eq!(canvas.pixel(10, 5), [0, 0, 255]);
+    }
+
+    #[test]
     fn rounded_bg_corner() {
         let dom = parse_html("<html><div></div></html>");
         let sheet = parse_css(
