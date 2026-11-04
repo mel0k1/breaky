@@ -668,20 +668,49 @@ fn paint_subtree(canvas: &mut Canvas, b: &LayoutBox, imgs: &img::Store) {
         });
     }
     paint_abs_group(canvas, b, imgs, true);
+    paint_rel_group(canvas, b, imgs, true);
     paint_text(canvas, b);
     paint_marker(canvas, b, imgs);
     for child in &b.children {
-        if !is_float(child) {
+        if !is_float(child) && z_rel(child).is_none() {
             paint_box(canvas, child, imgs);
         }
     }
     for child in &b.children {
-        if is_float(child) {
+        if is_float(child) && z_rel(child).is_none() {
             paint_box(canvas, child, imgs);
         }
     }
     paint_abs_group(canvas, b, imgs, false);
+    paint_rel_group(canvas, b, imgs, false);
     canvas.clip = saved;
+}
+
+fn z_rel(b: &LayoutBox) -> Option<i32> {
+    if b.text.is_some() {
+        return None;
+    }
+    let m = computed(b)?;
+    match m.get("position").and_then(|v| v.first()) {
+        Some(Value::Keyword(k)) if k == "relative" => {}
+        _ => return None,
+    }
+    m.get("z-index")?;
+    Some(z_index(b))
+}
+
+fn paint_rel_group(canvas: &mut Canvas, b: &LayoutBox, imgs: &img::Store, below: bool) {
+    let mut idx: Vec<usize> = (0..b.children.len())
+        .filter(|&i| {
+            z_rel(&b.children[i])
+                .map(|z| (z < 0) == below)
+                .unwrap_or(false)
+        })
+        .collect();
+    idx.sort_by_key(|&i| z_rel(&b.children[i]).unwrap_or(0));
+    for i in idx {
+        paint_box(canvas, &b.children[i], imgs);
+    }
 }
 
 fn paint_abs_group(canvas: &mut Canvas, b: &LayoutBox, imgs: &img::Store, below: bool) {
@@ -2463,6 +2492,72 @@ mod tests {
         assert_eq!(canvas.pixel(24, 12), [0, 0, 255]);
         assert_eq!(canvas.pixel(26, 10), [255, 255, 255]);
         assert_eq!(canvas.pixel(25, 16), [255, 255, 255]);
+    }
+
+    #[test]
+    fn relative_negative_z_below() {
+        let dom = parse_html("<html><div><div class=\"a\"></div><div class=\"b\"></div></div></html>");
+        let sheet = parse_css(
+            "div { width: 40px; height: 40px } div > div { width: 20px; height: 20px; margin: 0 } .a { background-color: #0000ff } .b { background-color: #ff0000; position: relative; z-index: -1; margin: -20px 0 0 10px }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let tree = layout(&styled, 100.0).unwrap();
+        let canvas = paint(&tree, 100.0);
+        assert_eq!(canvas.pixel(15, 10), [0, 0, 255]);
+        assert_eq!(canvas.pixel(25, 10), [255, 0, 0]);
+        assert_eq!(canvas.pixel(5, 10), [0, 0, 255]);
+    }
+
+    #[test]
+    fn relative_positive_z_above() {
+        let dom = parse_html("<html><div><div class=\"a\"></div><div class=\"b\"></div></div></html>");
+        let sheet = parse_css(
+            "div { width: 40px; height: 40px } div > div { width: 20px; height: 20px; margin: 0 } .a { background-color: #ff0000; position: relative; z-index: 1 } .b { background-color: #0000ff; margin: -20px 0 0 10px }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let tree = layout(&styled, 100.0).unwrap();
+        let canvas = paint(&tree, 100.0);
+        assert_eq!(canvas.pixel(15, 10), [255, 0, 0]);
+        assert_eq!(canvas.pixel(25, 10), [0, 0, 255]);
+        assert_eq!(canvas.pixel(5, 10), [255, 0, 0]);
+    }
+
+    #[test]
+    fn relative_zero_z_above_flow() {
+        let dom = parse_html("<html><div><div class=\"a\"></div><div class=\"b\"></div></div></html>");
+        let sheet = parse_css(
+            "div { width: 40px; height: 40px } div > div { width: 20px; height: 20px; margin: 0 } .a { background-color: #ff0000; position: relative; z-index: 0 } .b { background-color: #0000ff; margin: -20px 0 0 10px }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let tree = layout(&styled, 100.0).unwrap();
+        let canvas = paint(&tree, 100.0);
+        assert_eq!(canvas.pixel(15, 10), [255, 0, 0]);
+    }
+
+    #[test]
+    fn relative_auto_z_keeps_order() {
+        let dom = parse_html("<html><div><div class=\"a\"></div><div class=\"b\"></div></div></html>");
+        let sheet = parse_css(
+            "div { width: 40px; height: 40px } div > div { width: 20px; height: 20px; margin: 0 } .a { background-color: #ff0000; position: relative } .b { background-color: #0000ff; margin: -20px 0 0 10px }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let tree = layout(&styled, 100.0).unwrap();
+        let canvas = paint(&tree, 100.0);
+        assert_eq!(canvas.pixel(15, 10), [0, 0, 255]);
+    }
+
+    #[test]
+    fn relative_z_sorted() {
+        let dom = parse_html("<html><div><div class=\"a\"></div><div class=\"b\"></div><div class=\"c\"></div></div></html>");
+        let sheet = parse_css(
+            "div { width: 60px; height: 60px } div > div { width: 20px; height: 20px; margin: 0 } .a { background-color: #ff0000; position: relative; z-index: 2 } .b { background-color: #00ff00; position: relative; z-index: 5; margin-top: -20px } .c { background-color: #0000ff; position: relative; z-index: 3; margin: -20px 0 0 10px }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let tree = layout(&styled, 100.0).unwrap();
+        let canvas = paint(&tree, 100.0);
+        assert_eq!(canvas.pixel(15, 10), [0, 255, 0]);
+        assert_eq!(canvas.pixel(5, 10), [0, 255, 0]);
+        assert_eq!(canvas.pixel(25, 10), [0, 0, 255]);
     }
 
     #[test]
