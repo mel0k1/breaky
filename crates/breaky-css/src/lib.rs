@@ -605,6 +605,12 @@ fn split_top(s: &str) -> Vec<String> {
                     depth -= 1;
                     cur.push(ch);
                 }
+                ',' if depth == 0 => {
+                    if !cur.is_empty() {
+                        out.push(std::mem::take(&mut cur));
+                    }
+                    out.push(','.to_string());
+                }
                 c if c.is_whitespace() && depth == 0 => {
                     if !cur.is_empty() {
                         out.push(std::mem::take(&mut cur));

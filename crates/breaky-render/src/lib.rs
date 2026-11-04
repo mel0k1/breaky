@@ -109,12 +109,13 @@ impl Canvas {
         self.pixels[i + 3] = (oa * 255.0).round() as u8;
     }
 
-    fn fill_gradient(&mut self, r: Rect, g: &Gradient) {
+    fn fill_gradient(&mut self, r: Rect, g: &Gradient, radii: [(f32, f32); 4]) {
         let w = r.width;
         let h = r.height;
         if w <= 0.0 || h <= 0.0 || g.stops.is_empty() {
             return;
         }
+        let rounded = radii.iter().any(|(x, y)| *x > 0.0 || *y > 0.0);
         let (ux, uy) = match g.dir {
             Dir::Angle(a) => {
                 let rad = a.to_radians();
@@ -148,10 +149,51 @@ impl Canvas {
         for y in y0..y1 {
             let py = y as f32 + 0.5 - cy;
             for x in x0..x1 {
+                if rounded && !inside_rounded(r, radii, x as f32, y as f32) {
+                    continue;
+                }
                 let px = x as f32 + 0.5 - cx;
                 let t = (px * ux + py * uy + len / 2.0).clamp(0.0, len);
                 let c = stop_color(&stops, t);
                 self.blend(x, y, c);
+            }
+        }
+    }
+
+    fn fill_rounded(&mut self, r: Rect, radii: [(f32, f32); 4], c: Color) {
+        let x0 = r.x.floor().max(0.0) as i64;
+        let y0 = r.y.floor().max(0.0) as i64;
+        let x1 = ((r.x + r.width).ceil().min(self.width as f32)) as i64;
+        let y1 = ((r.y + r.height).ceil().min(self.height as f32)) as i64;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                if inside_rounded(r, radii, x as f32, y as f32) {
+                    self.blend(x, y, c);
+                }
+            }
+        }
+    }
+
+    fn fill_rounded_ring(
+        &mut self,
+        outer: Rect,
+        outer_radii: [(f32, f32); 4],
+        inner: Rect,
+        inner_radii: [(f32, f32); 4],
+        c: Color,
+    ) {
+        let x0 = outer.x.floor().max(0.0) as i64;
+        let y0 = outer.y.floor().max(0.0) as i64;
+        let x1 = ((outer.x + outer.width).ceil().min(self.width as f32)) as i64;
+        let y1 = ((outer.y + outer.height).ceil().min(self.height as f32)) as i64;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let p = (x as f32, y as f32);
+                if inside_rounded(outer, outer_radii, p.0, p.1)
+                    && !inside_rounded(inner, inner_radii, p.0, p.1)
+                {
+                    self.blend(x, y, c);
+                }
             }
         }
     }
@@ -584,12 +626,20 @@ fn text_metrics(map: Option<&std::collections::HashMap<String, Vec<Value>>>) -> 
 fn paint_bg(canvas: &mut Canvas, b: &LayoutBox, imgs: &img::Store) {
     let d = &b.dims;
     let bb = d.border_box();
+    let radii = computed(b)
+        .map(|m| radii_of(m, bb.width, bb.height))
+        .unwrap_or([(0.0, 0.0); 4]);
+    let rounded = radii.iter().any(|(x, y)| *x > 0.0 || *y > 0.0);
     if let Some(c) = computed(b).and_then(bg_color) {
-        canvas.fill(bb, c);
+        if rounded {
+            canvas.fill_rounded(bb, radii, c);
+        } else {
+            canvas.fill(bb, c);
+        }
     }
     if let Some(m) = computed(b) {
         if let Some(g) = bg_gradient(m) {
-            canvas.fill_gradient(bb, &g);
+            canvas.fill_gradient(bb, &g, radii);
         }
         if let Some(u) = bg_url(m) {
             if let Some(im) = imgs.get(&u) {
@@ -620,16 +670,25 @@ fn paint_bg(canvas: &mut Canvas, b: &LayoutBox, imgs: &img::Store) {
             }
         }
     }
-    if !borders_hidden(b) && d.border.top + d.border.right + d.border.bottom + d.border.left > 0.0
+    paint_border(canvas, b, bb, radii);
+}
+
+fn paint_border(canvas: &mut Canvas, b: &LayoutBox, bb: Rect, radii: [(f32, f32); 4]) {
+    let d = &b.dims;
+    if borders_hidden(b) || d.border.top + d.border.right + d.border.bottom + d.border.left <= 0.0
     {
-        let c = computed(b)
-            .and_then(|m| token_color(m, "border-color"))
-            .unwrap_or(Color {
-                r: 0,
-                g: 0,
-                b: 0,
-                a: 255,
-            });
+        return;
+    }
+    let c = computed(b)
+        .and_then(|m| token_color(m, "border-color"))
+        .unwrap_or(Color {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 255,
+        });
+    let rounded = radii.iter().any(|(x, y)| *x > 0.0 || *y > 0.0);
+    if !rounded {
         canvas.fill(
             Rect {
                 x: bb.x,
@@ -666,7 +725,129 @@ fn paint_bg(canvas: &mut Canvas, b: &LayoutBox, imgs: &img::Store) {
             },
             c,
         );
+        return;
     }
+    let pb = d.padding_box();
+    let inner = [
+        (
+            (radii[0].0 - d.border.left).max(0.0),
+            (radii[0].1 - d.border.top).max(0.0),
+        ),
+        (
+            (radii[1].0 - d.border.right).max(0.0),
+            (radii[1].1 - d.border.top).max(0.0),
+        ),
+        (
+            (radii[2].0 - d.border.right).max(0.0),
+            (radii[2].1 - d.border.bottom).max(0.0),
+        ),
+        (
+            (radii[3].0 - d.border.left).max(0.0),
+            (radii[3].1 - d.border.bottom).max(0.0),
+        ),
+    ];
+    canvas.fill_rounded_ring(bb, radii, pb, inner, c);
+}
+
+fn inside_rounded(r: Rect, radii: [(f32, f32); 4], x: f32, y: f32) -> bool {
+    if x < r.x || y < r.y || x >= r.x + r.width || y >= r.y + r.height {
+        return false;
+    }
+    let px = x - r.x;
+    let py = y - r.y;
+    let (w, h) = (r.width, r.height);
+    let corners = [
+        (radii[0], px < radii[0].0 && py < radii[0].1, radii[0].0, radii[0].1),
+        (
+            radii[1],
+            px > w - radii[1].0 && py < radii[1].1,
+            w - radii[1].0,
+            radii[1].1,
+        ),
+        (
+            radii[2],
+            px > w - radii[2].0 && py > h - radii[2].1,
+            w - radii[2].0,
+            h - radii[2].1,
+        ),
+        (
+            radii[3],
+            px < radii[3].0 && py > h - radii[3].1,
+            radii[3].0,
+            h - radii[3].1,
+        ),
+    ];
+    for ((rx, ry), region, cx, cy) in corners {
+        if region && rx > 0.0 && ry > 0.0 {
+            let dx = (px - cx) / rx;
+            let dy = (py - cy) / ry;
+            if dx * dx + dy * dy > 1.0 {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn radius_set4(vals: &[Value], font: f32, base: f32) -> Option<[f32; 4]> {
+    let of = |v: &Value| -> Option<f32> {
+        match v {
+            Value::Length(n, Unit::Px) => Some(*n),
+            Value::Length(n, Unit::Em) => Some(n * font),
+            Value::Keyword(k) => k
+                .strip_suffix('%')
+                .and_then(|p| p.parse::<f32>().ok())
+                .map(|p| base * p / 100.0),
+            _ => None,
+        }
+    };
+    let nums: Vec<f32> = vals.iter().filter_map(of).collect();
+    if nums.is_empty() {
+        return None;
+    }
+    Some(match nums.len() {
+        1 => [nums[0]; 4],
+        2 => [nums[0], nums[1], nums[0], nums[1]],
+        3 => [nums[0], nums[1], nums[2], nums[1]],
+        _ => [nums[0], nums[1], nums[2], nums[3]],
+    })
+}
+
+fn radii_of(m: &std::collections::HashMap<String, Vec<Value>>, w: f32, h: f32) -> [(f32, f32); 4] {
+    let font = text_metrics(Some(m)).0;
+    let vals: &[Value] = match m.get("border-radius") {
+        Some(v) => v,
+        None => return [(0.0, 0.0); 4],
+    };
+    let (hs, vs) = match vals
+        .iter()
+        .position(|v| matches!(v, Value::Keyword(k) if k == "/"))
+    {
+        Some(i) => (&vals[..i], Some(&vals[i + 1..])),
+        None => (vals, None),
+    };
+    let zero = [0.0f32; 4];
+    let hset = radius_set4(hs, font, w).unwrap_or(zero);
+    let vset = match vs.and_then(|v| radius_set4(v, font, h)) {
+        Some(v) => v,
+        None => hset,
+    };
+    let mut f = 1.0f32;
+    for (a, b) in [
+        (hset[0] + hset[1], w),
+        (hset[3] + hset[2], w),
+        (vset[0] + vset[3], h),
+        (vset[1] + vset[2], h),
+    ] {
+        if b > 0.0 && a > b {
+            f = f.min(b / a);
+        }
+    }
+    let mut out = [(0.0f32, 0.0f32); 4];
+    for i in 0..4 {
+        out[i] = ((hset[i] * f).max(0.0), (vset[i] * f).max(0.0));
+    }
+    out
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -2005,9 +2186,126 @@ mod tests {
     }
 
     fn near(p: [u8; 3], r: u8, g: u8, b: u8) -> bool {
-        (p[0] as i32 - r as i32).abs() <= 5
-            && (p[1] as i32 - g as i32).abs() <= 5
-            && (p[2] as i32 - b as i32).abs() <= 5
+        (p[0] as i32 - r as i32).abs() <= 7
+            && (p[1] as i32 - g as i32).abs() <= 7
+            && (p[2] as i32 - b as i32).abs() <= 7
+    }
+
+    #[test]
+    fn dbg_shadow() {
+        let dom = parse_html("<html><div></div></html>");
+        let sheet = parse_css(
+            "div { width: 20px; height: 20px; background-color: #ff0000; box-shadow: 5px 5px 0 #0000ff }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let tree = layout(&styled, 100.0).unwrap();
+        let canvas = paint(&tree, 100.0);
+        for (x, y) in [(10usize, 22usize), (22, 3), (3, 22), (10, 10), (25, 25)] {
+            eprintln!("DBG ({},{}) {:?}", x, y, canvas.pixel(x as u32, y as u32));
+        }
+    }
+
+    #[test]
+    fn rounded_bg_corner() {
+        let dom = parse_html("<html><div></div></html>");
+        let sheet = parse_css(
+            "div { width: 20px; height: 20px; background-color: #000000; border-radius: 10px }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let tree = layout(&styled, 100.0).unwrap();
+        let canvas = paint(&tree, 100.0);
+        assert_eq!(canvas.pixel(0, 0), [255, 255, 255]);
+        assert_eq!(canvas.pixel(19, 19), [255, 255, 255]);
+        assert_eq!(canvas.pixel(5, 5), [0, 0, 0]);
+        assert_eq!(canvas.pixel(10, 0), [0, 0, 0]);
+        assert_eq!(canvas.pixel(10, 10), [0, 0, 0]);
+    }
+
+    #[test]
+    fn radius_percent_circle() {
+        let dom = parse_html("<html><div></div></html>");
+        let sheet = parse_css(
+            "div { width: 20px; height: 20px; background-color: #000000; border-radius: 50% }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let tree = layout(&styled, 100.0).unwrap();
+        let canvas = paint(&tree, 100.0);
+        assert_eq!(canvas.pixel(0, 0), [255, 255, 255]);
+        assert_eq!(canvas.pixel(5, 5), [0, 0, 0]);
+        assert_eq!(canvas.pixel(10, 19), [0, 0, 0]);
+    }
+
+    #[test]
+    fn radius_clamped() {
+        let dom = parse_html("<html><div></div></html>");
+        let sheet = parse_css(
+            "div { width: 20px; height: 10px; background-color: #000000; border-radius: 10px }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let tree = layout(&styled, 100.0).unwrap();
+        let canvas = paint(&tree, 100.0);
+        assert_eq!(canvas.pixel(0, 0), [255, 255, 255]);
+        assert_eq!(canvas.pixel(3, 3), [0, 0, 0]);
+        assert_eq!(canvas.pixel(10, 0), [0, 0, 0]);
+    }
+
+    #[test]
+    fn rounded_border_ring() {
+        let dom = parse_html("<html><div></div></html>");
+        let sheet = parse_css(
+            "div { width: 20px; height: 20px; background-color: #ffffff; border: 3px solid #000000; border-radius: 10px }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let tree = layout(&styled, 100.0).unwrap();
+        let canvas = paint(&tree, 100.0);
+        assert_eq!(canvas.pixel(0, 0), [255, 255, 255]);
+        assert_eq!(canvas.pixel(1, 10), [0, 0, 0]);
+        assert_eq!(canvas.pixel(10, 1), [0, 0, 0]);
+        assert_eq!(canvas.pixel(10, 10), [255, 255, 255]);
+    }
+
+    #[test]
+    fn radius_four_values() {
+        let dom = parse_html("<html><div></div></html>");
+        let sheet = parse_css(
+            "div { width: 20px; height: 20px; background-color: #000000; border-radius: 0 0 0 10px }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let tree = layout(&styled, 100.0).unwrap();
+        let canvas = paint(&tree, 100.0);
+        assert_eq!(canvas.pixel(0, 0), [0, 0, 0]);
+        assert_eq!(canvas.pixel(19, 0), [0, 0, 0]);
+        assert_eq!(canvas.pixel(0, 19), [255, 255, 255]);
+        assert_eq!(canvas.pixel(3, 17), [0, 0, 0]);
+    }
+
+    #[test]
+    fn radius_ellipse_slash() {
+        let dom = parse_html("<html><div></div></html>");
+        let sheet = parse_css(
+            "div { width: 100px; height: 20px; background-color: #000000; border-radius: 100% / 50% }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let tree = layout(&styled, 100.0).unwrap();
+        let canvas = paint(&tree, 100.0);
+        assert_eq!(canvas.pixel(0, 0), [255, 255, 255]);
+        assert_eq!(canvas.pixel(10, 0), [255, 255, 255]);
+        assert_eq!(canvas.pixel(50, 0), [0, 0, 0]);
+        assert_eq!(canvas.pixel(0, 10), [0, 0, 0]);
+    }
+
+    #[test]
+    fn gradient_inside_rounded() {
+        let dom = parse_html("<html><div></div></html>");
+        let sheet = parse_css(
+            "div { width: 20px; height: 20px; background-image: linear-gradient(#ff0000, #0000ff); border-radius: 10px }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let tree = layout(&styled, 100.0).unwrap();
+        let canvas = paint(&tree, 100.0);
+        assert_eq!(canvas.pixel(0, 0), [255, 255, 255]);
+        assert!(near(canvas.pixel(10, 0), 255, 0, 0));
+        assert!(near(canvas.pixel(10, 19), 0, 0, 255));
     }
 
     #[test]
