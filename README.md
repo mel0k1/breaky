@@ -68,6 +68,11 @@ Workspace of small crates:
 - [x] Background size
 - [x] GIF decoder
 - [x] Object fit
+- [x] Background color shorthand
+- [x] Overflow
+- [x] Z-index
+- [x] Opacity
+- [x] Min and max dimensions
 
 ## License
 
