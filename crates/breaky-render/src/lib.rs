@@ -316,7 +316,9 @@ pub fn paint(root: &LayoutBox, viewport_width: f32) -> Canvas {
 
 pub fn paint_with(root: &LayoutBox, viewport_width: f32, imgs: &img::Store) -> Canvas {
     let bb = root.dims.border_box();
-    let height = ((bb.y + bb.height).max(max_bottom(root))
+    let height = ((bb.y + bb.height)
+        .max(max_bottom(root))
+        .max(shadow_bottom(root))
         .ceil()
         .max(1.0)) as u32;
     let mut canvas = Canvas::new(viewport_width.max(1.0) as u32, height);
@@ -334,6 +336,28 @@ pub fn paint_with(root: &LayoutBox, viewport_width: f32, imgs: &img::Store) -> C
     paint_box(&mut canvas, root, imgs);
     canvas
 }
+
+fn shadow_bottom(b: &LayoutBox) -> f32 {
+    let bb = b.dims.border_box();
+    if clips(b) {
+        return bb.y + bb.height;
+    }
+    let mut m = 0.0f32;
+    if let Some(map) = computed(b) {
+        for s in shadows_of(map) {
+            m = m.max(s.dy.max(0.0) + s.blur + s.spread + 1.0);
+        }
+    }
+    let mut bottom = bb.y + bb.height + m;
+    for c in &b.children {
+        bottom = bottom.max(shadow_bottom(c));
+    }
+    for c in &b.abs {
+        bottom = bottom.max(shadow_bottom(c));
+    }
+    bottom
+}
+
 
 fn max_bottom(b: &LayoutBox) -> f32 {
     let bb = b.dims.border_box();
@@ -478,6 +502,141 @@ fn paint_img(canvas: &mut Canvas, b: &LayoutBox, imgs: &img::Store) {
     canvas.image_scaled(dx, dy, dw, dh, im, c, !nearest);
 }
 
+struct Shadow {
+    dx: f32,
+    dy: f32,
+    blur: f32,
+    spread: f32,
+    color: Color,
+}
+
+fn split_groups(vals: &[Value]) -> Vec<&[Value]> {
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    for (i, v) in vals.iter().enumerate() {
+        if matches!(v, Value::Keyword(k) if k == ",") {
+            if i > start {
+                out.push(&vals[start..i]);
+            }
+            start = i + 1;
+        }
+    }
+    if start < vals.len() {
+        out.push(&vals[start..]);
+    }
+    out
+}
+
+fn shadows_of(m: &std::collections::HashMap<String, Vec<Value>>) -> Vec<Shadow> {
+    let font = text_metrics(Some(m)).0;
+    let mut out = Vec::new();
+    if let Some(vals) = m.get("box-shadow") {
+        for group in split_groups(vals) {
+            let mut inset = false;
+            let mut color = None;
+            let mut lens: Vec<f32> = Vec::new();
+            for v in group {
+                match v {
+                    Value::Color(c) => color = Some(*c),
+                    Value::Keyword(k) if k == "inset" => inset = true,
+                    Value::Length(n, Unit::Px) => lens.push(*n),
+                    Value::Length(n, Unit::Em) => lens.push(n * font),
+                    _ => {}
+                }
+            }
+            if inset || lens.len() < 2 {
+                continue;
+            }
+            out.push(Shadow {
+                dx: lens[0],
+                dy: lens[1],
+                blur: lens.get(2).copied().unwrap_or(0.0).max(0.0),
+                spread: lens.get(3).copied().unwrap_or(0.0),
+                color: color.unwrap_or(Color {
+                    r: 0,
+                    g: 0,
+                    b: 0,
+                    a: 255,
+                }),
+            });
+        }
+    }
+    out
+}
+
+fn sdf_rounded(r: Rect, radii: [(f32, f32); 4], x: f32, y: f32) -> f32 {
+    let cx = r.x + r.width / 2.0;
+    let cy = r.y + r.height / 2.0;
+    let hw = r.width / 2.0;
+    let hh = r.height / 2.0;
+    let i = match (x < cx, y < cy) {
+        (true, true) => 0,
+        (false, true) => 1,
+        (false, false) => 2,
+        (true, false) => 3,
+    };
+    let (rx, ry) = radii[i];
+    let qx = (x - cx).abs() - (hw - rx);
+    let qy = (y - cy).abs() - (hh - ry);
+    if qx > 0.0 && qy > 0.0 {
+        if rx > 0.0 && ry > 0.0 {
+            let t = ((qx / rx) * (qx / rx) + (qy / ry) * (qy / ry)).sqrt();
+            (t - 1.0) * rx.min(ry)
+        } else {
+            (qx * qx + qy * qy).sqrt()
+        }
+    } else if qx > 0.0 {
+        qx - rx
+    } else if qy > 0.0 {
+        qy - ry
+    } else {
+        qx.max(qy)
+    }
+}
+
+fn paint_shadow(canvas: &mut Canvas, bb: Rect, radii: [(f32, f32); 4], s: &Shadow) {
+    let r = Rect {
+        x: bb.x + s.dx - s.spread,
+        y: bb.y + s.dy - s.spread,
+        width: (bb.width + 2.0 * s.spread).max(0.0),
+        height: (bb.height + 2.0 * s.spread).max(0.0),
+    };
+    if r.width <= 0.0 || r.height <= 0.0 {
+        return;
+    }
+    let mut sr = [(0.0f32, 0.0f32); 4];
+    for i in 0..4 {
+        sr[i] = ((radii[i].0 + s.spread).max(0.0), (radii[i].1 + s.spread).max(0.0));
+    }
+    let m = s.blur + 1.0;
+    let x0 = (r.x - m).floor().max(0.0) as i64;
+    let y0 = (r.y - m).floor().max(0.0) as i64;
+    let x1 = ((r.x + r.width + m).ceil().min(canvas.width as f32)) as i64;
+    let y1 = ((r.y + r.height + m).ceil().min(canvas.height as f32)) as i64;
+    let a = s.color.a as f32 / 255.0;
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let px = x as f32 + 0.5;
+            let py = y as f32 + 0.5;
+            if inside_rounded(bb, radii, px, py) {
+                continue;
+            }
+            let d = sdf_rounded(r, sr, px, py);
+            let k = if s.blur > 0.0 {
+                (0.5 - d / s.blur).clamp(0.0, 1.0)
+            } else if d < 0.0 {
+                1.0
+            } else {
+                0.0
+            };
+            if k > 0.0 {
+                canvas.blend_alpha(x, y, s.color.r, s.color.g, s.color.b, a * k);
+            }
+        }
+    }
+}
+
+
 fn paint_box(canvas: &mut Canvas, b: &LayoutBox, imgs: &img::Store) {
     let op = computed(b).map(opacity_of).unwrap_or(1.0);
     if op < 1.0 {
@@ -490,6 +649,14 @@ fn paint_box(canvas: &mut Canvas, b: &LayoutBox, imgs: &img::Store) {
 }
 
 fn paint_subtree(canvas: &mut Canvas, b: &LayoutBox, imgs: &img::Store) {
+    let bb = b.dims.border_box();
+    let radii = computed(b)
+        .map(|m| radii_of(m, bb.width, bb.height))
+        .unwrap_or([(0.0, 0.0); 4]);
+    let shadows = computed(b).map(shadows_of).unwrap_or_default();
+    for s in shadows.iter().rev() {
+        paint_shadow(canvas, bb, radii, s);
+    }
     paint_bg(canvas, b, imgs);
     paint_img(canvas, b, imgs);
     let saved = canvas.clip;
@@ -2203,6 +2370,99 @@ mod tests {
         for (x, y) in [(10usize, 22usize), (22, 3), (3, 22), (10, 10), (25, 25)] {
             eprintln!("DBG ({},{}) {:?}", x, y, canvas.pixel(x as u32, y as u32));
         }
+    }
+
+    #[test]
+    fn shadow_offset() {
+        let dom = parse_html("<html><div></div></html>");
+        let sheet = parse_css(
+            "div { width: 20px; height: 20px; background-color: #ff0000; box-shadow: 5px 5px 0 #0000ff }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let tree = layout(&styled, 100.0).unwrap();
+        let canvas = paint(&tree, 100.0);
+        assert_eq!(canvas.pixel(22, 10), [0, 0, 255]);
+        assert_eq!(canvas.pixel(10, 22), [0, 0, 255]);
+        assert_eq!(canvas.pixel(10, 10), [255, 0, 0]);
+        assert_eq!(canvas.pixel(22, 3), [255, 255, 255]);
+        assert_eq!(canvas.pixel(3, 22), [255, 255, 255]);
+    }
+
+    #[test]
+    fn shadow_blur_falloff() {
+        let dom = parse_html("<html><div></div></html>");
+        let sheet = parse_css(
+            "div { width: 20px; height: 20px; background-color: #ff0000; box-shadow: 5px 0 4px #0000ff }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let tree = layout(&styled, 100.0).unwrap();
+        let canvas = paint(&tree, 100.0);
+        let p = canvas.pixel(26, 10);
+        assert!(p[2] > 240);
+        assert!(p[0] > 150 && p[0] < 250);
+        assert_eq!(p[0], p[1]);
+        assert_eq!(canvas.pixel(28, 10), [255, 255, 255]);
+        let q = canvas.pixel(23, 10);
+        assert!(q[0] < 80 && q[2] > 200);
+    }
+
+    #[test]
+    #[test]
+    fn shadow_spread() {
+        let dom = parse_html("<html><div></div></html>");
+        let sheet = parse_css(
+            "div { width: 20px; height: 20px; background-color: #ff0000; box-shadow: 0 0 0 3px #0000ff }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let tree = layout(&styled, 100.0).unwrap();
+        let canvas = paint(&tree, 100.0);
+        assert_eq!(canvas.pixel(22, 10), [0, 0, 255]);
+        assert_eq!(canvas.pixel(10, 22), [0, 0, 255]);
+        assert_eq!(canvas.pixel(22, 21), [0, 0, 255]);
+        assert_eq!(canvas.pixel(1, 10), [255, 0, 0]);
+        assert_eq!(canvas.pixel(10, 10), [255, 0, 0]);
+    }
+
+    #[test]
+    fn shadow_multiple_order() {
+        let dom = parse_html("<html><div></div></html>");
+        let sheet = parse_css(
+            "div { width: 20px; height: 20px; background-color: #ff0000; box-shadow: 5px 0 0 #00ff00, 10px 0 0 #0000ff }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let tree = layout(&styled, 100.0).unwrap();
+        let canvas = paint(&tree, 100.0);
+        assert_eq!(canvas.pixel(22, 10), [0, 255, 0]);
+        assert_eq!(canvas.pixel(27, 10), [0, 0, 255]);
+        assert_eq!(canvas.pixel(32, 10), [255, 255, 255]);
+    }
+
+    #[test]
+    fn shadow_inset_ignored() {
+        let dom = parse_html("<html><div></div></html>");
+        let sheet = parse_css(
+            "div { width: 20px; height: 20px; background-color: #ff0000; box-shadow: inset 5px 5px 0 #0000ff }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let tree = layout(&styled, 100.0).unwrap();
+        let canvas = paint(&tree, 100.0);
+        assert_eq!(canvas.pixel(22, 10), [255, 255, 255]);
+        assert_eq!(canvas.pixel(10, 10), [255, 0, 0]);
+    }
+
+    #[test]
+    fn shadow_follows_radius() {
+        let dom = parse_html("<html><div></div></html>");
+        let sheet = parse_css(
+            "div { width: 20px; height: 20px; background-color: #ff0000; border-radius: 10px; box-shadow: 5px 0 0 #0000ff }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let tree = layout(&styled, 100.0).unwrap();
+        let canvas = paint(&tree, 100.0);
+        assert_eq!(canvas.pixel(23, 10), [0, 0, 255]);
+        assert_eq!(canvas.pixel(24, 12), [0, 0, 255]);
+        assert_eq!(canvas.pixel(26, 10), [255, 255, 255]);
+        assert_eq!(canvas.pixel(25, 16), [255, 255, 255]);
     }
 
     #[test]
