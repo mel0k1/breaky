@@ -21,6 +21,8 @@ pub enum Value {
     Color(Color),
     Url(String),
     Gradient(Gradient),
+    Time(f32),
+    Bezier([f32; 4]),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -84,6 +86,12 @@ impl fmt::Display for Value {
             Value::Color(c) => write!(f, "{}", c),
             Value::Url(u) => write!(f, "url({})", u),
             Value::Gradient(g) => write!(f, "{}", g),
+            Value::Time(t) => write!(f, "{}s", t),
+            Value::Bezier(b) => write!(
+                f,
+                "cubic-bezier({}, {}, {}, {})",
+                b[0], b[1], b[2], b[3]
+            ),
         }
     }
 }
@@ -401,6 +409,23 @@ pub fn parse_value(s: &str) -> Vec<Value> {
     split_top(s).iter().map(|t| token(t)).collect()
 }
 
+pub fn groups(vals: &[Value]) -> Vec<&[Value]> {
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    for (i, v) in vals.iter().enumerate() {
+        if matches!(v, Value::Keyword(k) if k == ",") {
+            if i > start {
+                out.push(&vals[start..i]);
+            }
+            start = i + 1;
+        }
+    }
+    if start < vals.len() {
+        out.push(&vals[start..]);
+    }
+    out
+}
+
 fn token(t: &str) -> Value {
     if let Some(v) = length(t) {
         return v;
@@ -414,7 +439,35 @@ fn token(t: &str) -> Value {
     if let Some(g) = gradient(t) {
         return Value::Gradient(g);
     }
+    if let Some(s) = time(t) {
+        return Value::Time(s);
+    }
+    if let Some(b) = bezier(t) {
+        return Value::Bezier(b);
+    }
     Value::Keyword(t.to_lowercase())
+}
+
+fn time(t: &str) -> Option<f32> {
+    if let Some(n) = t.strip_suffix("ms") {
+        return n.trim().parse::<f32>().ok().map(|v| v / 1000.0);
+    }
+    t.strip_suffix('s')?.trim().parse::<f32>().ok()
+}
+
+fn bezier(t: &str) -> Option<[f32; 4]> {
+    let inner = t.strip_prefix("cubic-bezier(")?.strip_suffix(')')?;
+    let parts: Vec<f32> = split_commas(inner)
+        .iter()
+        .filter_map(|p| p.trim().parse().ok())
+        .collect();
+    if parts.len() != 4 {
+        return None;
+    }
+    if !(0.0..=1.0).contains(&parts[0]) || !(0.0..=1.0).contains(&parts[2]) {
+        return None;
+    }
+    Some([parts[0], parts[1], parts[2], parts[3]])
 }
 
 fn gradient(t: &str) -> Option<Gradient> {
@@ -1233,6 +1286,54 @@ mod tests {
         assert_eq!(
             v,
             vec![Value::Keyword("radial-gradient(nonsense at red, blue)".into())]
+        );
+    }
+
+    #[test]
+    fn time_values() {
+        let v = parse_value("250ms 2s 0s");
+        assert_eq!(
+            v,
+            vec![Value::Time(0.25), Value::Time(2.0), Value::Time(0.0)]
+        );
+        let v = parse_value("ease-in-out infinite");
+        assert_eq!(
+            v,
+            vec![
+                Value::Keyword("ease-in-out".into()),
+                Value::Keyword("infinite".into())
+            ]
+        );
+    }
+
+    #[test]
+    fn bezier_values() {
+        let v = parse_value("cubic-bezier(0.25, 0.1, 0.25, 1)");
+        assert_eq!(v, vec![Value::Bezier([0.25, 0.1, 0.25, 1.0])]);
+        let v = parse_value("cubic-bezier(2, 0, 0.5, 1)");
+        assert_eq!(
+            v,
+            vec![Value::Keyword("cubic-bezier(2, 0, 0.5, 1)".into())]
+        );
+    }
+
+    #[test]
+    fn value_groups() {
+        let v = parse_value("color 1s ease-in, width 2s linear");
+        let g = groups(&v);
+        assert_eq!(g.len(), 2);
+        assert_eq!(g[0][0], Value::Keyword("color".into()));
+        assert_eq!(g[0][1], Value::Time(1.0));
+        assert_eq!(g[1][2], Value::Keyword("linear".into()));
+    }
+
+    #[test]
+    fn time_display() {
+        assert_eq!(Value::Time(0.25).to_string(), "0.25s");
+        assert_eq!(Value::Time(2.0).to_string(), "2s");
+        assert_eq!(
+            Value::Bezier([0.0, 0.0, 1.0, 1.0]).to_string(),
+            "cubic-bezier(0, 0, 1, 1)"
         );
     }
 }

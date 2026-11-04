@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use css::{Rule, Selector, SimpleSelector, Stylesheet, Unit, Value};
+use css::{Color, Rule, Selector, SimpleSelector, Stylesheet, Unit, Value};
 use html::{Node, NodeKind};
 
 const BASE_FONT: f32 = 16.0;
@@ -399,6 +399,298 @@ fn apply_selection(computed: &mut HashMap<String, Vec<Value>>, decls: &[&css::De
     }
 }
 
+fn font_px(computed: &HashMap<String, Vec<Value>>) -> f32 {
+    match computed.get("font-size").and_then(|v| v.first()) {
+        Some(Value::Length(n, _)) => *n,
+        _ => BASE_FONT,
+    }
+}
+
+fn px_of(v: &Value, font: f32) -> f32 {
+    match v {
+        Value::Length(n, Unit::Px) => *n,
+        Value::Length(n, Unit::Em) => n * font,
+        _ => 0.0,
+    }
+}
+
+fn ease_of(v: &Value) -> Option<[f32; 4]> {
+    match v {
+        Value::Bezier(b) => Some(*b),
+        Value::Keyword(k) => match k.as_str() {
+            "linear" => Some([0.0, 0.0, 1.0, 1.0]),
+            "ease" => Some([0.25, 0.1, 0.25, 1.0]),
+            "ease-in" => Some([0.42, 0.0, 1.0, 1.0]),
+            "ease-out" => Some([0.0, 0.0, 0.58, 1.0]),
+            "ease-in-out" => Some([0.42, 0.0, 0.58, 1.0]),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn transition_items(m: &HashMap<String, Vec<Value>>) -> Vec<(String, f32, f32, [f32; 4])> {
+    let mut props: Vec<Option<String>> = Vec::new();
+    let mut durs: Vec<Option<f32>> = Vec::new();
+    let mut eases: Vec<Option<[f32; 4]>> = Vec::new();
+    let mut delays: Vec<Option<f32>> = Vec::new();
+    if let Some(vals) = m.get("transition") {
+        for g in css::groups(vals) {
+            let mut prop = None;
+            let mut dur = None;
+            let mut ease = None;
+            let mut delay = None;
+            for v in g {
+                match v {
+                    Value::Time(s) => {
+                        if dur.is_none() {
+                            dur = Some(*s);
+                        } else if delay.is_none() {
+                            delay = Some(*s);
+                        }
+                    }
+                    Value::Bezier(_) => ease = ease_of(v),
+                    Value::Keyword(k) => match k.as_str() {
+                        "none" => {}
+                        _ => {
+                            if ease.is_none() {
+                                if let Some(b) = ease_of(v) {
+                                    ease = Some(b);
+                                    continue;
+                                }
+                            }
+                            if prop.is_none() {
+                                prop = Some(k.clone());
+                            }
+                        }
+                    },
+                    _ => {}
+                }
+            }
+            props.push(prop);
+            durs.push(dur);
+            eases.push(ease);
+            delays.push(delay);
+        }
+    }
+    let pick = |key: &str| -> Option<Vec<&Value>> {
+        m.get(key).map(|vals| {
+            css::groups(vals)
+                .into_iter()
+                .filter_map(|g| g.first())
+                .collect()
+        })
+    };
+    if let Some(list) = pick("transition-property") {
+        props = list.iter().map(|v| match v {
+            Value::Keyword(k) => Some(k.clone()),
+            _ => None,
+        }).collect();
+    }
+    if let Some(list) = pick("transition-duration") {
+        durs = list.iter().map(|v| match v {
+            Value::Time(s) => Some(*s),
+            _ => None,
+        }).collect();
+    }
+    if let Some(list) = pick("transition-timing-function") {
+        eases = list.iter().map(|v| ease_of(v)).collect();
+    }
+    if let Some(list) = pick("transition-delay") {
+        delays = list.iter().map(|v| match v {
+            Value::Time(s) => Some(*s),
+            _ => None,
+        }).collect();
+    }
+    let n = props.len();
+    let at = |v: &Vec<Option<String>>, i: usize| -> String {
+        match v.get(i % v.len().max(1)).and_then(|x| x.clone()) {
+            Some(k) => k,
+            None => "all".to_string(),
+        }
+    };
+    (0..n)
+        .filter(|i| props[*i].as_deref() != Some("none"))
+        .map(|i| {
+            (
+                at(&props, i),
+                durs.get(i % durs.len().max(1)).copied().flatten().unwrap_or(0.0),
+                delays.get(i % delays.len().max(1)).copied().flatten().unwrap_or(0.0),
+                eases
+                    .get(i % eases.len().max(1))
+                    .copied()
+                    .flatten()
+                    .unwrap_or([0.25, 0.1, 0.25, 1.0]),
+            )
+        })
+        .collect()
+}
+
+fn easing(b: [f32; 4], x: f32) -> f32 {
+    let x = x.clamp(0.0, 1.0);
+    let cx = 3.0 * b[0];
+    let bx = 3.0 * (b[2] - b[0]) - cx;
+    let ax = 1.0 - cx - bx;
+    let cy = 3.0 * b[1];
+    let by = 3.0 * (b[3] - b[1]) - cy;
+    let ay = 1.0 - cy - by;
+    let sx = |s: f32| ((ax * s + bx) * s + cx) * s;
+    let sy = |s: f32| ((ay * s + by) * s + cy) * s;
+    let dx = |s: f32| (3.0 * ax * s + 2.0 * bx) * s + cx;
+    let mut s = x;
+    for _ in 0..8 {
+        let e = sx(s) - x;
+        if e.abs() < 1e-6 {
+            return sy(s);
+        }
+        let d = dx(s);
+        if d.abs() < 1e-6 {
+            break;
+        }
+        s -= e / d;
+    }
+    let (mut lo, mut hi) = (0.0f32, 1.0f32);
+    s = x;
+    for _ in 0..20 {
+        let e = sx(s);
+        if (e - x).abs() < 1e-6 {
+            break;
+        }
+        if e < x {
+            lo = s;
+        } else {
+            hi = s;
+        }
+        s = (lo + hi) / 2.0;
+    }
+    sy(s)
+}
+
+fn mix_color(a: &Color, b: &Color, k: f32) -> Color {
+    let mix = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * k).round() as u8;
+    Color {
+        r: mix(a.r, b.r),
+        g: mix(a.g, b.g),
+        b: mix(a.b, b.b),
+        a: mix(a.a, b.a),
+    }
+}
+
+fn interpolate(
+    fv: &[Value],
+    tv: &[Value],
+    ff: f32,
+    tf: f32,
+    k: f32,
+) -> Option<Vec<Value>> {
+    let f = fv.first()?;
+    let t = tv.first()?;
+    match (f, t) {
+        (Value::Length(_, _), Value::Length(_, _)) => {
+            let a = px_of(f, ff);
+            let b = px_of(t, tf);
+            Some(vec![Value::Length(a + (b - a) * k, Unit::Px)])
+        }
+        (Value::Color(a), Value::Color(b)) => Some(vec![Value::Color(mix_color(a, b, k))]),
+        _ => None,
+    }
+}
+
+fn same_box<'a>(a: &StyledNode<'a>, b: &StyledNode<'a>) -> bool {
+    std::ptr::eq(a.node as *const Node, b.node as *const Node)
+        && a.pseudo.as_ref().map(|(k, _)| *k) == b.pseudo.as_ref().map(|(k, _)| *k)
+}
+
+fn clone_tree<'a>(n: &StyledNode<'a>) -> StyledNode<'a> {
+    StyledNode {
+        node: n.node,
+        computed: n.computed.clone(),
+        pseudo: n.pseudo.clone(),
+        children: n.children.iter().map(clone_tree).collect(),
+    }
+}
+
+pub fn transition_merge<'a>(
+    from: &StyledNode<'a>,
+    to: &StyledNode<'a>,
+    t: f32,
+) -> StyledNode<'a> {
+    let mut computed = to.computed.clone();
+    let mut items = transition_items(&to.computed);
+    if items.is_empty() {
+        items = transition_items(&from.computed);
+    }
+    for (prop, dur, delay, bez) in items {
+        let targets: Vec<String> = if prop == "all" {
+            to.computed
+                .keys()
+                .filter(|k| {
+                    from.computed.contains_key(*k) && !k.starts_with("transition")
+                })
+                .cloned()
+                .collect()
+        } else if from.computed.contains_key(&prop) && to.computed.contains_key(&prop) {
+            vec![prop]
+        } else {
+            Vec::new()
+        };
+        for p in targets {
+            let fv = &from.computed[&p];
+            let tv = &to.computed[&p];
+            if fv == tv {
+                continue;
+            }
+            let k = if dur <= 0.0 {
+                if t >= delay {
+                    1.0
+                } else {
+                    0.0
+                }
+            } else {
+                ((t - delay) / dur).clamp(0.0, 1.0)
+            };
+            let e = easing(bez, k);
+            let v = interpolate(fv, tv, font_px(&from.computed), font_px(&to.computed), e)
+                .unwrap_or_else(|| if e < 0.5 { fv.clone() } else { tv.clone() });
+            computed.insert(p, v);
+        }
+    }
+    let mut children: Vec<StyledNode<'a>> = Vec::new();
+    let mut i = 0usize;
+    let mut j = 0usize;
+    while i < from.children.len() && j < to.children.len() {
+        if same_box(&from.children[i], &to.children[j]) {
+            children.push(transition_merge(&from.children[i], &to.children[j], t));
+            i += 1;
+            j += 1;
+            continue;
+        }
+        match to.children[j..]
+            .iter()
+            .position(|c| same_box(c, &from.children[i]))
+        {
+            Some(off) => {
+                for c in &to.children[j..j + off] {
+                    children.push(clone_tree(c));
+                }
+                j += off;
+            }
+            None => {
+                i += 1;
+            }
+        }
+    }
+    for c in &to.children[j..] {
+        children.push(clone_tree(c));
+    }
+    StyledNode {
+        node: to.node,
+        computed,
+        pseudo: to.pseudo.clone(),
+        children,
+    }
+}
+
 fn selector_matches(node: &Node, s: &Selector, ancestors: &[&Node]) -> bool {
     chain_matches(node, ancestors, &s.compounds)
 }
@@ -781,5 +1073,175 @@ mod tests {
         assert_eq!(b.pseudo.as_ref().unwrap().0, "before");
         assert_eq!(b.computed["::selection-color"], vec![rgb(255, 0, 0)]);
         assert_eq!(b.computed["::selection-background"], vec![rgb(0, 0, 255)]);
+    }
+
+    fn near_c(v: &Value, r: u8, g: u8, b: u8) -> bool {
+        match v {
+            Value::Color(c) => {
+                (c.r as i32 - r as i32).abs() <= 2
+                    && (c.g as i32 - g as i32).abs() <= 2
+                    && (c.b as i32 - b as i32).abs() <= 2
+            }
+            _ => false,
+        }
+    }
+
+    #[test]
+    fn easing_endpoints_and_monotonic() {
+        assert_eq!(easing([0.25, 0.1, 0.25, 1.0], 0.0), 0.0);
+        assert_eq!(easing([0.25, 0.1, 0.25, 1.0], 1.0), 1.0);
+        assert_eq!(easing([0.0, 0.0, 1.0, 1.0], 0.5), 0.5);
+        assert!(easing([0.42, 0.0, 1.0, 1.0], 0.5) < 0.5);
+        assert!(easing([0.0, 0.0, 0.58, 1.0], 0.5) > 0.5);
+        let mut prev = -1.0;
+        for i in 0..=20 {
+            let e = easing([0.25, 0.1, 0.25, 1.0], i as f32 / 20.0);
+            assert!(e >= prev);
+            prev = e;
+        }
+    }
+
+    #[test]
+    fn transition_color_midpoint() {
+        let dom = parse_html("<p>t</p>");
+        let base = parse_css("p { color: red; transition: color 1s linear }");
+        let target = parse_css("p { color: blue }");
+        let from = build(&dom, &base);
+        let to = build(&dom, &target);
+        let mid = transition_merge(&from, &to, 0.5);
+        let p = el(&mid, "p");
+        assert!(near_c(&p.computed["color"][0], 128, 0, 128));
+        let start = transition_merge(&from, &to, 0.0);
+        assert_eq!(el(&start, "p").computed["color"], vec![rgb(255, 0, 0)]);
+        let end = transition_merge(&from, &to, 1.0);
+        assert_eq!(el(&end, "p").computed["color"], vec![rgb(0, 0, 255)]);
+    }
+
+    #[test]
+    fn transition_delay_and_clamp() {
+        let dom = parse_html("<p>t</p>");
+        let base = parse_css("p { color: red; transition: color 1s 0.5s linear }");
+        let target = parse_css("p { color: blue }");
+        let from = build(&dom, &base);
+        let to = build(&dom, &target);
+        let before = transition_merge(&from, &to, 0.25);
+        assert_eq!(el(&before, "p").computed["color"], vec![rgb(255, 0, 0)]);
+        let quarter = transition_merge(&from, &to, 0.75);
+        assert!(near_c(&el(&quarter, "p").computed["color"][0], 191, 0, 64));
+        let after = transition_merge(&from, &to, 5.0);
+        assert_eq!(el(&after, "p").computed["color"], vec![rgb(0, 0, 255)]);
+    }
+
+    #[test]
+    fn transition_unlisted_prop_jumps() {
+        let dom = parse_html("<p>t</p>");
+        let base = parse_css("p { color: red; margin-left: 10px; transition: color 1s linear }");
+        let target = parse_css("p { color: blue; margin-left: 40px }");
+        let from = build(&dom, &base);
+        let to = build(&dom, &target);
+        let mid = transition_merge(&from, &to, 0.5);
+        let p = el(&mid, "p");
+        assert!(near_c(&p.computed["color"][0], 128, 0, 128));
+        assert_eq!(p.computed["margin-left"], vec![Value::Length(40.0, Unit::Px)]);
+    }
+
+    #[test]
+    fn transition_em_resolves_against_own_font() {
+        let dom = parse_html("<p>t</p>");
+        let base = parse_css(
+            "p { font-size: 16px; margin-left: 1em; transition: margin-left 1s linear }",
+        );
+        let target = parse_css("p { font-size: 16px; margin-left: 3em }");
+        let from = build(&dom, &base);
+        let to = build(&dom, &target);
+        let mid = transition_merge(&from, &to, 0.5);
+        assert_eq!(
+            el(&mid, "p").computed["margin-left"],
+            vec![Value::Length(32.0, Unit::Px)]
+        );
+    }
+
+    #[test]
+    fn transition_discrete_keyword_flips() {
+        let dom = parse_html("<p>t</p>");
+        let base = parse_css("p { text-align: left; transition: text-align 1s linear }");
+        let target = parse_css("p { text-align: center }");
+        let from = build(&dom, &base);
+        let to = build(&dom, &target);
+        let early = transition_merge(&from, &to, 0.25);
+        assert_eq!(el(&early, "p").computed["text-align"], vec![Value::Keyword("left".into())]);
+        let late = transition_merge(&from, &to, 0.75);
+        assert_eq!(
+            el(&late, "p").computed["text-align"],
+            vec![Value::Keyword("center".into())]
+        );
+    }
+
+    #[test]
+    fn transition_zero_duration_is_instant() {
+        let dom = parse_html("<p>t</p>");
+        let base = parse_css("p { color: red; transition: color 0s }");
+        let target = parse_css("p { color: blue }");
+        let from = build(&dom, &base);
+        let to = build(&dom, &target);
+        let merged = transition_merge(&from, &to, 0.0);
+        assert_eq!(el(&merged, "p").computed["color"], vec![rgb(0, 0, 255)]);
+    }
+
+    #[test]
+    fn transition_multiple_props_and_easing() {
+        let dom = parse_html("<p>t</p>");
+        let base = parse_css(
+            "p { color: red; margin-left: 0px; transition: color 2s linear, margin-left 1s ease-in-out }",
+        );
+        let target = parse_css("p { color: blue; margin-left: 100px }");
+        let from = build(&dom, &base);
+        let to = build(&dom, &target);
+        let m = transition_merge(&from, &to, 0.5);
+        let p = el(&m, "p");
+        assert!(near_c(&p.computed["color"][0], 191, 0, 64));
+        let ml = match &p.computed["margin-left"][0] {
+            Value::Length(n, _) => *n,
+            _ => panic!("not a length"),
+        };
+        assert!(ml > 40.0 && ml < 60.0);
+    }
+
+    #[test]
+    fn transition_longhands_override() {
+        let dom = parse_html("<p>t</p>");
+        let base = parse_css(
+            "p { color: red; transition-property: color; transition-duration: 1s; transition-timing-function: linear }",
+        );
+        let target = parse_css("p { color: blue }");
+        let from = build(&dom, &base);
+        let to = build(&dom, &target);
+        let mid = transition_merge(&from, &to, 0.5);
+        assert!(near_c(&el(&mid, "p").computed["color"][0], 128, 0, 128));
+    }
+
+    #[test]
+    fn transition_adds_pseudo_child() {
+        let dom = parse_html("<p>t</p>");
+        let base = parse_css("p { color: red }");
+        let target = parse_css("p { color: blue } p::before { content: \"!\" }");
+        let from = build(&dom, &base);
+        let to = build(&dom, &target);
+        let merged = transition_merge(&from, &to, 0.5);
+        let p = el(&merged, "p");
+        assert_eq!(p.children.len(), 2);
+        assert_eq!(p.children[0].pseudo.as_ref().unwrap().0, "before");
+        assert!(p.children[1].pseudo.is_none());
+    }
+
+    #[test]
+    fn transition_declared_in_target_sheet() {
+        let dom = parse_html("<p>t</p>");
+        let base = parse_css("p { color: red }");
+        let target = parse_css("p { color: blue; transition: color 1s linear }");
+        let from = build(&dom, &base);
+        let to = build(&dom, &target);
+        let mid = transition_merge(&from, &to, 0.5);
+        assert!(near_c(&el(&mid, "p").computed["color"][0], 128, 0, 128));
     }
 }

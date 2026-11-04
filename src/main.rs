@@ -15,6 +15,10 @@ fn main() {
         fetch(&args);
         return;
     }
+    if args.len() >= 6 {
+        transition_page(&args);
+        return;
+    }
     let src = fs::read_to_string(path).unwrap_or_else(fail);
     let dom = html::parse(&src);
     html::print_tree(&dom, 0);
@@ -53,6 +57,46 @@ fn main() {
                 fs::write(out, canvas.to_png()).unwrap_or_else(fail);
             }
         }
+    }
+}
+
+fn transition_page(args: &[String]) {
+    let src = fs::read_to_string(&args[1]).unwrap_or_else(fail);
+    let dom = html::parse(&src);
+    html::print_tree(&dom, 0);
+    let mut doc_css = String::new();
+    style::collect_css(&dom, &mut doc_css);
+    let mut base = fs::read_to_string(&args[2]).unwrap_or_else(fail);
+    base.push_str(&doc_css);
+    let mut target = fs::read_to_string(&args[3]).unwrap_or_else(fail);
+    target.push_str(&doc_css);
+    let sheet_from = css::parse(&base);
+    let sheet_to = css::parse(&target);
+    let from = build(&dom, &sheet_from);
+    let to = build(&dom, &sheet_to);
+    let t = args
+        .get(6)
+        .and_then(|s| s.parse::<f32>().ok())
+        .unwrap_or(f32::INFINITY);
+    let merged = style::transition_merge(&from, &to, t);
+    println!();
+    print_styled(&merged, 0);
+    let viewport = args[4].parse::<f32>().unwrap_or(800.0);
+    let mut imgs = img::Store::new();
+    let mut urls: Vec<String> = Vec::new();
+    gather_images(&merged, &mut urls);
+    let base_css = Path::new(&args[2]).parent().unwrap_or(Path::new("."));
+    load_local_images(&urls, base_css, &mut imgs);
+    let mut srcs: Vec<String> = Vec::new();
+    gather_dom_images(&dom, &mut srcs);
+    let base_html = Path::new(&args[1]).parent().unwrap_or(Path::new("."));
+    load_local_images(&srcs, base_html, &mut imgs);
+    if let Some(tree) = layout::layout_with(&merged, viewport, &imgs) {
+        println!();
+        layout::print_tree(&tree, 0);
+        let canvas = render::paint_with(&tree, viewport, &imgs);
+        fs::write(&args[5], canvas.to_png()).unwrap_or_else(fail);
+        println!("saved {}", args[5]);
     }
 }
 
