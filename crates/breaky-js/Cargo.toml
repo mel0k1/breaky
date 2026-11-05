@@ -6,3 +6,4 @@ license = "MIT"
 build = "build.rs"
 
 [dependencies]
+breaky-html = { path = "../breaky-html" }

@@ -28,7 +28,10 @@ and prints each frame delay in milliseconds. The `animate` command renders a
 whole page on a timer, stepping every animated GIF at its frame delay, for a
 local file or a remote URL. Scripts in `<script>` tags (inline or `src`,
 local or remote) run in an embedded QuickJS engine and print through
-`console.log`.
+`console.log`. Scripts get live DOM bindings — `document.getElementById`,
+`document.body`, `innerHTML`, `textContent`, `getAttribute`/`setAttribute`
+and a `style` proxy for inline CSS properties — and mutations take effect
+before the page is styled, laid out and painted.
 
 ## Architecture
 
@@ -40,7 +43,7 @@ Workspace of small crates:
 - `breaky-layout` — box tree and block/inline layout
 - `breaky-render` — PNG painter (hand-written encoder, zero deps)
 - `breaky-font` — TTF font engine with per-family registries
-- `breaky-js` — embedded QuickJS interpreter (vendored C, FFI bindings)
+- `breaky-js` — embedded QuickJS interpreter (vendored C, FFI bindings) with mutable DOM bindings
 - `breaky-img` — PNG, JPEG and GIF decoders with GIF animation frames (hand-written inflate, IDCT, LZW, zero deps)
 - `breaky-net` — HTTP client and URL resolution
 - `breaky-tls` — TLS 1.3 client with X.509 chain validation to the system trust store (hand-rolled, zero deps)
@@ -108,6 +111,7 @@ Workspace of small crates:
 - [x] Flex gap (shorthand cascade, wrap-aware)
 - [x] @font-face with deferred web fonts, per family metrics
 - [x] QuickJS scripting (`<script>` inline and src, console.log)
+- [x] DOM bindings (getElementById, innerHTML, textContent, attributes, inline styles)
 
 ## License
 

@@ -1,3 +1,6 @@
+mod dom;
+
+use html::Node;
 use std::ffi::CString;
 use std::os::raw::{c_char, c_int, c_void};
 
@@ -26,11 +29,32 @@ struct JSContext {
     _p: [u8; 0],
 }
 
+type JSCFunction =
+    unsafe extern "C" fn(*mut JSContext, JSValue, c_int, *const JSValue) -> JSValue;
+
 extern "C" {
     fn JS_NewRuntime() -> *mut JSRuntime;
     fn JS_NewContext(rt: *mut JSRuntime) -> *mut JSContext;
     fn JS_FreeRuntime(rt: *mut JSRuntime);
     fn JS_FreeContext(ctx: *mut JSContext);
+    fn JS_NewCFunction2(
+        ctx: *mut JSContext,
+        f: JSCFunction,
+        name: *const c_char,
+        length: c_int,
+        cproto: c_int,
+        magic: c_int,
+    ) -> JSValue;
+    fn JS_GetGlobalObject(ctx: *mut JSContext) -> JSValue;
+    fn JS_NewStringLen(ctx: *mut JSContext, s: *const c_char, len: usize) -> JSValue;
+    fn JS_SetPropertyStr(
+        ctx: *mut JSContext,
+        obj: JSValue,
+        prop: *const c_char,
+        val: JSValue,
+    ) -> c_int;
+    fn JS_GetContextOpaque(ctx: *mut JSContext) -> *mut c_void;
+    fn JS_SetContextOpaque(ctx: *mut JSContext, opaque: *mut c_void);
     fn JS_Eval(
         ctx: *mut JSContext,
         input: *const c_char,
@@ -55,6 +79,7 @@ fn cstr(s: &str) -> CString {
 pub struct Runtime {
     rt: *mut JSRuntime,
     ctx: *mut JSContext,
+    dom: *mut dom::DomState,
 }
 
 unsafe impl Send for Runtime {}
@@ -65,8 +90,16 @@ impl Runtime {
             let rt = JS_NewRuntime();
             let ctx = JS_NewContext(rt);
             breaky_install_console(ctx);
-            Runtime { rt, ctx }
+            Runtime {
+                rt,
+                ctx,
+                dom: std::ptr::null_mut(),
+            }
         }
+    }
+
+    pub fn bind_dom(&mut self, root: &mut Node) {
+        dom::install(self, root);
     }
 
     pub fn eval(&mut self, src: &str) -> Result<String, String> {
@@ -115,6 +148,9 @@ impl Drop for Runtime {
         unsafe {
             JS_FreeContext(self.ctx);
             JS_FreeRuntime(self.rt);
+        }
+        if !self.dom.is_null() {
+            drop(unsafe { Box::from_raw(self.dom) });
         }
     }
 }

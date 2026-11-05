@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>DOM bindings</title>
+</head>
+<body>
+<h1>DOM bindings</h1>
+<div id="card">static placeholder</div>
+<script>
+var card = document.getElementById("card");
+card.innerHTML = "mutated by <b>QuickJS</b>: getElementById, innerHTML, style";
+card.style.background = "#fff2dd";
+card.style["border-color"] = "#c98a2d";
+console.log("card", card.getAttribute("id"), card.textContent.length);
+</script>
+</body>
+</html>

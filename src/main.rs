@@ -30,7 +30,7 @@ fn main() {
         return;
     }
     let src = fs::read_to_string(path).unwrap_or_else(fail);
-    let dom = html::parse(&src);
+    let mut dom = html::parse(&src);
     html::print_tree(&dom, 0);
     if let Some(css) = args.get(2) {
         let mut css_text = fs::read_to_string(css).unwrap_or_else(fail);
@@ -39,6 +39,10 @@ fn main() {
         css_text.push_str(&doc_css);
         let sheet = css::parse(&css_text);
         let selected = args.get(5).map(|s| s.as_str()) == Some("sel");
+        let base_html = Path::new(path).parent().unwrap_or(Path::new("."));
+        let mut scripts: Vec<Script> = Vec::new();
+        gather_scripts(&dom, &mut scripts);
+        run_scripts(&scripts, &mut dom, base_html, None);
         let styled = if selected {
             build_selected(&dom, &sheet)
         } else {
@@ -58,12 +62,8 @@ fn main() {
         load_local_images(&urls, base_css, &mut imgs, &mut anims);
         let mut srcs: Vec<String> = Vec::new();
         gather_dom_images(&dom, &mut srcs);
-        let base_html = Path::new(path).parent().unwrap_or(Path::new("."));
         load_local_images(&srcs, base_html, &mut imgs, &mut anims);
         load_faces(&sheet, &styled, base_css, None);
-        let mut scripts: Vec<Script> = Vec::new();
-        gather_scripts(&dom, &mut scripts);
-        run_scripts(&scripts, base_html, None);
         if let Some(tree) = layout::layout_with(&styled, viewport, &imgs) {
             println!();
             layout::print_tree(&tree, 0);
@@ -126,9 +126,17 @@ fn fetch(args: &[String]) {
         .unwrap_or(800.0);
     let out = args.get(4).map(|s| s.as_str()).unwrap_or("page.png");
     let mut client = net::Client::new();
-    let (base, dom, css_text) = remote_page(&mut client, url);
+    let (base, mut dom, css_text) = remote_page(&mut client, url);
     html::print_tree(&dom, 0);
     let sheet = css::parse(&css_text);
+    let mut scripts: Vec<Script> = Vec::new();
+    gather_scripts(&dom, &mut scripts);
+    run_scripts(
+        &scripts,
+        &mut dom,
+        Path::new("."),
+        Some((&mut client, &base)),
+    );
     let styled = build(&dom, &sheet);
     println!();
     print_styled(&styled, 0);
@@ -145,9 +153,6 @@ fn fetch(args: &[String]) {
     }
     load_remote_images(&mut client, &urls, &base, &mut imgs, &mut anims);
     load_faces(&sheet, &styled, Path::new("."), Some((&mut client, &base)));
-    let mut scripts: Vec<Script> = Vec::new();
-    gather_scripts(&dom, &mut scripts);
-    run_scripts(&scripts, Path::new("."), Some((&mut client, &base)));
     if let Some(tree) = layout::layout_with(&styled, viewport, &imgs) {
         println!();
         layout::print_tree(&tree, 0);
@@ -216,7 +221,7 @@ fn animate_cmd(args: &[String]) {
         .unwrap_or(800.0);
     let prefix = args.get(pi).map(|s| s.as_str()).unwrap_or("frame");
     let mut client = net::Client::new();
-    let (dom, css_text, base) = if remote {
+    let (mut dom, css_text, base) = if remote {
         let (b, d, c) = remote_page(&mut client, src);
         (d, c, Some(b))
     } else {
@@ -230,6 +235,18 @@ fn animate_cmd(args: &[String]) {
         (dom, css_text, None)
     };
     let sheet = css::parse(&css_text);
+    let mut scripts: Vec<Script> = Vec::new();
+    gather_scripts(&dom, &mut scripts);
+    let base_html = Path::new(src).parent().unwrap_or(Path::new("."));
+    match &base {
+        Some(b) => run_scripts(
+            &scripts,
+            &mut dom,
+            Path::new("."),
+            Some((&mut client, b)),
+        ),
+        None => run_scripts(&scripts, &mut dom, base_html, None),
+    }
     let styled = build(&dom, &sheet);
     let mut imgs = img::Store::new();
     let mut anims = img::AnimStore::new();
@@ -237,14 +254,11 @@ fn animate_cmd(args: &[String]) {
     gather_images(&styled, &mut urls);
     let mut srcs: Vec<String> = Vec::new();
     gather_dom_images(&dom, &mut srcs);
-    match base {
+    match &base {
         Some(b) => {
-            load_remote_images(&mut client, &urls, &b, &mut imgs, &mut anims);
-            load_remote_images(&mut client, &srcs, &b, &mut imgs, &mut anims);
-            load_faces(&sheet, &styled, Path::new("."), Some((&mut client, &b)));
-            let mut scripts: Vec<Script> = Vec::new();
-            gather_scripts(&dom, &mut scripts);
-            run_scripts(&scripts, Path::new("."), Some((&mut client, &b)));
+            load_remote_images(&mut client, &urls, b, &mut imgs, &mut anims);
+            load_remote_images(&mut client, &srcs, b, &mut imgs, &mut anims);
+            load_faces(&sheet, &styled, Path::new("."), Some((&mut client, b)));
         }
         None => {
             let base_css = args
@@ -257,12 +271,8 @@ fn animate_cmd(args: &[String]) {
                 &mut imgs,
                 &mut anims,
             );
-            let base_html = Path::new(src).parent().unwrap_or(Path::new("."));
             load_local_images(&srcs, base_html, &mut imgs, &mut anims);
             load_faces(&sheet, &styled, base_css.unwrap_or(Path::new(".")), None);
-            let mut scripts: Vec<Script> = Vec::new();
-            gather_scripts(&dom, &mut scripts);
-            run_scripts(&scripts, base_html, None);
         }
     }
     let tree = match layout::layout_with(&styled, viewport, &imgs) {
@@ -330,6 +340,7 @@ fn collect_text(node: &Node, out: &mut String) {
 
 fn run_scripts(
     scripts: &[Script],
+    dom: &mut Node,
     base: &Path,
     remote: Option<(&mut net::Client, &Url)>,
 ) {
@@ -341,6 +352,7 @@ fn run_scripts(
         None => (None, None),
     };
     let mut rt = js::Runtime::new();
+    rt.bind_dom(dom);
     for s in scripts {
         let code = match (&s.src, url_base) {
             (Some(u), Some(b)) => match net::resolve(b, u) {

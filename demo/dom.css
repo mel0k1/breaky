@@ -1,0 +1,18 @@
+body {
+    font-family: sans-serif;
+    padding: 20px;
+    background: #fafafa;
+}
+h1 {
+    color: #24435c;
+}
+#card {
+    background: #eef4ff;
+    border: 1px solid #7a9bd4;
+    border-radius: 6px;
+    padding: 12px 16px;
+    width: 340px;
+}
+#card b {
+    color: #1c4fa0;
+}
