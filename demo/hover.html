@@ -1,0 +1,19 @@
+<html><head><style>
+#x { width: 120px; height: 60px; background: #4060a0; color: white; }
+#y { width: 120px; height: 60px; background: #a04060; color: white; }
+#s { width: 200px; height: 30px; }
+</style></head><body>
+<div id="x">A</div>
+<div id="y">B</div>
+<div id="s">idle</div>
+<script>
+var s = document.getElementById('s');
+document.addEventListener('boot', function () { s.textContent = 'booted' });
+document.dispatchEvent(new Event('boot'));
+var x = document.getElementById('x');
+var y = document.getElementById('y');
+x.addEventListener('mouseover', function () { s.textContent = 'over A' });
+x.addEventListener('mouseout', function () { s.textContent = 'left A' });
+y.addEventListener('mouseover', function () { s.textContent = 'over B' });
+</script>
+</body></html>

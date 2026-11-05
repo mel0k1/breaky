@@ -146,6 +146,44 @@ pub(super) fn dispatch_event(
     }
 }
 
+pub(super) fn dispatch_move(
+    rt: &mut super::Runtime,
+    path: &[usize],
+    x: f32,
+    y: f32,
+) -> Result<bool, String> {
+    let name = cstr("__move");
+    unsafe {
+        let global = JS_GetGlobalObject(rt.ctx);
+        let f = JS_GetPropertyStr(rt.ctx, global, name.as_ptr());
+        breaky_free_value(rt.ctx, global);
+        if f.tag == TAG_UNDEFINED || f.tag == TAG_NULL {
+            breaky_free_value(rt.ctx, f);
+            return Ok(false);
+        }
+        let args = [
+            js_string(rt.ctx, &encode_path(path)),
+            js_string(rt.ctx, &format!("{}", x)),
+            js_string(rt.ctx, &format!("{}", y)),
+        ];
+        let r = JS_Call(rt.ctx, f, js_undefined(), 3, args.as_ptr());
+        breaky_free_value(rt.ctx, f);
+        for a in &args {
+            breaky_free_value(rt.ctx, *a);
+        }
+        if breaky_is_exception(r) != 0 {
+            let e = JS_GetException(rt.ctx);
+            let msg = to_string(rt.ctx, e);
+            breaky_free_value(rt.ctx, e);
+            Err(msg)
+        } else {
+            let out = to_string(rt.ctx, r) == "true";
+            breaky_free_value(rt.ctx, r);
+            Ok(out)
+        }
+    }
+}
+
 unsafe fn opaque(ctx: *mut JSContext) -> &'static mut DomState {
     let p = JS_GetContextOpaque(ctx) as *mut DomState;
     &mut *p
@@ -2182,5 +2220,168 @@ mod tests {
                 .unwrap(),
             "5"
         );
+    }
+
+    #[test]
+    fn event_constructor_defaults_and_flags() {
+        let mut dom = tree();
+        assert_eq!(
+            eval_on(
+                &mut dom,
+                "var e = new Event('x'); [e.type, e.bubbles, e.cancelable, e.defaultPrevented, e.target === null].join(':')"
+            ),
+            "x:false:false:false:true"
+        );
+        assert_eq!(
+            eval_on(
+                &mut dom,
+                "var e = new Event('x', { bubbles: true, cancelable: true }); [e.bubbles, e.cancelable].join(':')"
+            ),
+            "true:true"
+        );
+    }
+
+    #[test]
+    fn prevent_default_needs_cancelable() {
+        let mut dom = tree();
+        assert_eq!(
+            eval_on(
+                &mut dom,
+                "var e = new Event('x'); e.preventDefault(); e.defaultPrevented"
+            ),
+            "false"
+        );
+        assert_eq!(
+            eval_on(
+                &mut dom,
+                "var e = new Event('x', { cancelable: true }); e.preventDefault(); e.defaultPrevented"
+            ),
+            "true"
+        );
+    }
+
+    #[test]
+    fn dispatch_event_from_js_targets_element() {
+        let mut dom = tree();
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        rt.eval(log_target()).unwrap();
+        rt.eval("document.getElementById('a').addEventListener('ping', L('a'))")
+            .unwrap();
+        assert_eq!(
+            rt.eval("document.getElementById('a').dispatchEvent(new Event('ping'))")
+                .unwrap(),
+            "true"
+        );
+        assert_eq!(log_of(&mut rt), "a:P:P");
+    }
+
+    #[test]
+    fn dispatch_event_respects_bubbles_flag() {
+        let mut dom = tree();
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        rt.eval("globalThis.__log = []").unwrap();
+        rt.eval(
+            "document.body.addEventListener('ping', function () { globalThis.__log.push('body') })",
+        )
+        .unwrap();
+        rt.eval(
+            "document.addEventListener('ping', function () { globalThis.__log.push('doc') })",
+        )
+        .unwrap();
+        assert_eq!(
+            rt.eval("document.getElementById('a').dispatchEvent(new Event('ping'))")
+                .unwrap(),
+            "false"
+        );
+        assert_eq!(rt.eval("globalThis.__log.join('|')").unwrap(), "");
+        assert_eq!(
+            rt.eval("document.getElementById('a').dispatchEvent(new Event('ping', { bubbles: true }))")
+                .unwrap(),
+            "true"
+        );
+        assert_eq!(rt.eval("globalThis.__log.join('|')").unwrap(), "body|doc");
+    }
+
+    #[test]
+    fn document_dispatch_event_targets_document() {
+        let mut dom = tree();
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        rt.eval("globalThis.__log = []; document.addEventListener('boom', function (ev) { globalThis.__log.push('doc:' + (ev.target === document)) })")
+            .unwrap();
+        assert_eq!(
+            rt.eval("document.dispatchEvent(new Event('boom'))").unwrap(),
+            "true"
+        );
+        assert_eq!(rt.eval("globalThis.__log.join('|')").unwrap(), "doc:true");
+    }
+
+    #[test]
+    fn dispatch_event_rejects_non_event() {
+        let mut dom = tree();
+        assert_eq!(
+            eval_on(
+                &mut dom,
+                "try { document.getElementById('a').dispatchEvent('x') } catch (e) { e.name }"
+            ),
+            "TypeError"
+        );
+    }
+
+    #[test]
+    fn move_dispatches_mouseout_then_mouseover_pair() {
+        let mut dom = tree();
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        rt.eval(log_target()).unwrap();
+        rt.eval(
+            "var a = document.getElementById('a'); var b = document.getElementById('b'); a.addEventListener('mouseover', L('over-a')); a.addEventListener('mouseout', L('out-a')); b.addEventListener('mouseover', L('over-b')); b.addEventListener('mouseout', L('out-b'))",
+        )
+        .unwrap();
+        let pa = find_first(&dom, &|n| has_id(n, "a"), &mut Vec::new()).unwrap();
+        let pb = find_first(&dom, &|n| has_id(n, "b"), &mut Vec::new()).unwrap();
+        assert_eq!(rt.dispatch_move(&pa, 10.0, 5.0).unwrap(), true);
+        assert_eq!(log_of(&mut rt), "over-a:P:P");
+        assert_eq!(rt.dispatch_move(&pb, 20.0, 5.0).unwrap(), true);
+        assert_eq!(log_of(&mut rt), "over-a:P:P|out-a:P:P|over-b:P:P");
+    }
+
+    #[test]
+    fn move_sets_related_target_and_coordinates() {
+        let mut dom = tree();
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        rt.eval("globalThis.__seen = []; var a = document.getElementById('a'); var b = document.getElementById('b'); a.addEventListener('mouseout', function (ev) { globalThis.__seen.push('out:' + ev.relatedTarget.getAttribute('id') + ':' + ev.clientX + ':' + ev.clientY) }); b.addEventListener('mouseover', function (ev) { globalThis.__seen.push('over:' + ev.relatedTarget.getAttribute('id') + ':' + ev.clientX + ':' + ev.clientY) })")
+            .unwrap();
+        let pa = find_first(&dom, &|n| has_id(n, "a"), &mut Vec::new()).unwrap();
+        let pb = find_first(&dom, &|n| has_id(n, "b"), &mut Vec::new()).unwrap();
+        rt.dispatch_move(&pa, 10.0, 5.0).unwrap();
+        rt.dispatch_move(&pb, 30.0, 7.0).unwrap();
+        assert_eq!(
+            rt.eval("globalThis.__seen.join('|')").unwrap(),
+            "out:b:30:7|over:a:30:7"
+        );
+    }
+
+    #[test]
+    fn move_to_same_target_is_noop_and_leave_clears_hover() {
+        let mut dom = tree();
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        rt.eval(log_target()).unwrap();
+        rt.eval(
+            "var a = document.getElementById('a'); a.addEventListener('mouseover', L('over-a')); a.addEventListener('mouseout', L('out-a'))",
+        )
+        .unwrap();
+        let pa = find_first(&dom, &|n| has_id(n, "a"), &mut Vec::new()).unwrap();
+        assert_eq!(rt.dispatch_move(&pa, 1.0, 1.0).unwrap(), true);
+        assert_eq!(rt.dispatch_move(&pa, 1.0, 1.0).unwrap(), false);
+        assert_eq!(log_of(&mut rt), "over-a:P:P");
+        assert_eq!(rt.dispatch_move(&[], 1.0, 1.0).unwrap(), true);
+        assert_eq!(log_of(&mut rt), "over-a:P:P|out-a:P:P");
+        assert_eq!(rt.dispatch_move(&[], 1.0, 1.0).unwrap(), false);
+        assert_eq!(log_of(&mut rt), "over-a:P:P|out-a:P:P");
     }
 }

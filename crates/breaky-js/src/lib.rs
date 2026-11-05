@@ -122,6 +122,10 @@ impl Runtime {
         dom::dispatch_event(self, typ, path, x, y, key)
     }
 
+    pub fn dispatch_move(&mut self, path: &[usize], x: f32, y: f32) -> Result<bool, String> {
+        dom::dispatch_move(self, path, x, y)
+    }
+
     pub fn set_rects(&mut self, rects: &HashMap<Vec<usize>, (f32, f32, f32, f32)>) {
         dom::set_rects(self, rects);
     }

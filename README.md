@@ -29,7 +29,10 @@ whole page on a timer, stepping every animated GIF at its frame delay, for a
 local file or a remote URL. The `click` command fires a click on an element
 found by a CSS selector (at its rendered center) or at raw `X,Y` coordinates
 hit-tested against the layout boxes, then paints the result. `mouse` fires
-`mouseover` the same way, `key` dispatches `keydown` with `ev.key` set
+`mouseover` the same way, and with a second target it moves the pointer from
+the first to the second, dispatching `mouseout` on the old element and
+`mouseover` on the new one with `relatedTarget` set; `key` dispatches
+`keydown` with `ev.key` set
 (targeted at `body`, bubbling to `document`). Scripts in
 `<script>` tags (inline or `src`, local or remote) run in an embedded
 QuickJS engine and print through `console.log`. Scripts get live DOM
@@ -45,7 +48,10 @@ Text nodes are real wrappers with `data` and `nodeType`. Handlers get a real
 event object — `type`, `target`, `currentTarget`, `clientX`/`clientY`, `key`,
 `button`, `preventDefault`, `stopPropagation` — and
 `addEventListener(type, fn, capture)` on elements and `document` dispatches
-through capture and bubble phases up the ancestor chain. In event commands
+through capture and bubble phases up the ancestor chain, and pages can build
+their own `new Event(type, { bubbles, cancelable })` with
+`preventDefault`/`stopPropagation` and fire it with `dispatchEvent` on
+elements and `document`. In event commands
 `getBoundingClientRect()` returns the border box of the last layout
 (`x`, `y`, `width`, `height`, `left`, `top`, `right`, `bottom`); during the
 first script pass no layout exists yet, so it reports zeros.
@@ -137,6 +143,7 @@ Workspace of small crates:
 - [x] createTextNode/cloneNode, text node wrappers with mutable `data`
 - [x] mouseover and keydown events (`breaky mouse`, `breaky key`), document-level listeners, `ev.key`
 - [x] getBoundingClientRect() over the layout boxes
+- [x] `new Event()` constructor and `dispatchEvent()` from JS, mouseover/mouseout pairs with previous-target tracking (`breaky mouse <from> <to>`)
 
 ## License
 

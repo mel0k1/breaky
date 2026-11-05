@@ -91,8 +91,20 @@ fn main() {
 fn event_cmd(args: &[String], typ: &str) {
     let src = args.get(2).unwrap_or_else(|| usage());
     let remote = src.contains("://");
-    let (si, vi, oi) = if remote { (3, 4, 5) } else { (4, 5, 6) };
+    let si = if remote { 3 } else { 4 };
     let target_arg = args.get(si).unwrap_or_else(|| usage());
+    let to_arg = if typ == "mouseover" {
+        args.get(si + 1).filter(|s| s.parse::<f32>().is_err())
+    } else {
+        None
+    };
+    let (vi, oi) = if to_arg.is_some() {
+        (si + 2, si + 3)
+    } else if remote {
+        (4, 5)
+    } else {
+        (5, 6)
+    };
     let viewport = args
         .get(vi)
         .and_then(|s| s.parse::<f32>().ok())
@@ -155,7 +167,9 @@ fn event_cmd(args: &[String], typ: &str) {
         collect_rects(&tree, &map, &mut rects);
         rt.set_rects(&rects);
     }
-    let target: Option<Vec<usize>> = if let Some((x, y)) = point {
+    let target: Option<Vec<usize>> = if to_arg.is_some() {
+        None
+    } else if let Some((x, y)) = point {
         match layout::layout_with(&styled, viewport, &imgs) {
             Some(tree) => {
                 let mut map = HashMap::new();
@@ -184,7 +198,24 @@ fn event_cmd(args: &[String], typ: &str) {
             }
         }
     };
-    if let Some(p) = &target {
+    if let Some(to) = &to_arg {
+        match resolve_target(&dom, &styled, viewport, &imgs, target_arg) {
+            Ok(from) => match resolve_target(&dom, &styled, viewport, &imgs, to) {
+                Ok(dest) => {
+                    if let Err(e) = rt.dispatch_move(&from.0, from.1, from.2) {
+                        eprintln!("{}", e);
+                    }
+                    match rt.dispatch_move(&dest.0, dest.1, dest.2) {
+                        Ok(true) => {}
+                        Ok(false) => eprintln!("hover unchanged"),
+                        Err(e) => eprintln!("{}", e),
+                    }
+                }
+                Err(e) => eprintln!("{}", e),
+            },
+            Err(e) => eprintln!("{}", e),
+        }
+    } else if let Some(p) = &target {
         let (cx, cy) = if typ == "keydown" {
             (0.0, 0.0)
         } else {
@@ -236,6 +267,37 @@ fn parse_point(s: &str) -> Option<(f32, f32)> {
     let x = a.trim().parse::<f32>().ok()?;
     let y = b.trim().parse::<f32>().ok()?;
     Some((x, y))
+}
+
+fn resolve_target(
+    dom: &Node,
+    styled: &StyledNode,
+    viewport: f32,
+    imgs: &img::Store,
+    arg: &str,
+) -> Result<(Vec<usize>, f32, f32), String> {
+    if let Some((x, y)) = parse_point(arg) {
+        let tree = match layout::layout_with(styled, viewport, imgs) {
+            Some(t) => t,
+            None => return Err("empty layout".to_string()),
+        };
+        let mut map = HashMap::new();
+        addr_paths(dom, &mut map, &mut Vec::new());
+        return match hit_test(&tree, x, y, &map) {
+            Some(p) => Ok((p, x, y)),
+            None => Err(format!("no element at {},{}", x, y)),
+        };
+    }
+    let p = match style::query_first(dom, arg) {
+        Some(p) => p,
+        None => return Err(format!("{}: no match", arg)),
+    };
+    let tree = match layout::layout_with(styled, viewport, imgs) {
+        Some(t) => t,
+        None => return Err("empty layout".to_string()),
+    };
+    let (cx, cy) = box_center(&tree, node_at(dom, &p)).unwrap_or((0.0, 0.0));
+    Ok((p, cx, cy))
 }
 
 fn addr_paths(dom: &Node, out: &mut HashMap<usize, Vec<usize>>, path: &mut Vec<usize>) {
@@ -886,7 +948,9 @@ fn usage() -> ! {
     eprintln!("       breaky click <file> [style.css] <selector|X,Y> [width] [out.png]");
     eprintln!("       breaky click <url> <selector|X,Y> [width] [out.png]");
     eprintln!("       breaky mouse <file> [style.css] <selector|X,Y> [width] [out.png]");
+    eprintln!("       breaky mouse <file> [style.css] <from> <to> [width] [out.png]");
     eprintln!("       breaky mouse <url> <selector|X,Y> [width] [out.png]");
+    eprintln!("       breaky mouse <url> <from> <to> [width] [out.png]");
     eprintln!("       breaky key <file> [style.css] <key> [width] [out.png]");
     exit(2);
 }

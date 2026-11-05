@@ -115,33 +115,34 @@ function dropLs(key, type, fn, capture) {
     if (ls[i].type === type && ls[i].fn === fn && ls[i].capture === cap) ls.splice(i, 1);
   }
 }
-globalThis.__fire = function(type, targetPath, xs, ys, key) {
+globalThis.Event = function Event(type, opts) {
+  if (!(this instanceof Event)) throw new TypeError("Event requires new");
+  if (arguments.length === 0) throw new TypeError("Event requires a type");
+  var o = opts || {};
+  this.type = String(type);
+  this.bubbles = o.bubbles === true;
+  this.cancelable = o.cancelable === true;
+  this.target = null;
+  this.currentTarget = null;
+  this.relatedTarget = null;
+  this.defaultPrevented = false;
+  this.preventDefault = function () {
+    if (this.cancelable) this.defaultPrevented = true;
+  };
+  this.stopPropagation = function () {
+    this.__stop = true;
+  };
+  this.stopImmediatePropagation = function () {
+    this.__stop = true;
+    this.__stopNow = true;
+  };
+};
+function dispatch(ev, targetPath) {
   var segs = targetPath === "" ? [] : targetPath.split(".");
   var chain = [];
   for (var s = segs.length; s >= 1; s--) chain.push(segs.slice(0, s).join("."));
   chain.push("");
-  var tgt = targetPath === "" ? globalThis.document : el(targetPath);
-  var ev = {
-    type: type,
-    target: tgt,
-    currentTarget: null,
-    clientX: parseFloat(xs),
-    clientY: parseFloat(ys),
-    key: key === undefined ? "" : String(key),
-    button: 0,
-    bubbles: true,
-    defaultPrevented: false,
-    preventDefault: function() {
-      ev.defaultPrevented = true;
-    },
-    stopPropagation: function() {
-      ev.__stop = true;
-    },
-    stopImmediatePropagation: function() {
-      ev.__stop = true;
-      ev.__stopNow = true;
-    },
-  };
+  ev.target = targetPath === "" ? globalThis.document : el(targetPath);
   var fired = 0;
   var ci, i, ls;
   for (ci = chain.length - 1; ci >= 0 && !ev.__stop; ci--) {
@@ -149,29 +150,64 @@ globalThis.__fire = function(type, targetPath, xs, ys, key) {
     ls = globalThis.__listeners[chain[ci]];
     if (!ls) continue;
     for (i = 0; i < ls.length && !ev.__stopNow; i++) {
-      if (ls[i].type === type && ls[i].capture) {
+      if (ls[i].type === ev.type && ls[i].capture) {
         ls[i].fn.call(ev.currentTarget, ev);
         fired++;
       }
     }
   }
   for (ci = 0; ci < chain.length && !ev.__stop; ci++) {
+    if (ci > 0 && !ev.bubbles) break;
     ev.currentTarget = chain[ci] === "" ? globalThis.document : el(chain[ci]);
     ls = globalThis.__listeners[chain[ci]];
     if (ls) {
       for (i = 0; i < ls.length && !ev.__stopNow; i++) {
-        if (ls[i].type === type && !ls[i].capture) {
+        if (ls[i].type === ev.type && !ls[i].capture) {
           ls[i].fn.call(ev.currentTarget, ev);
           fired++;
         }
       }
     }
-    if (type === "click" && globalThis.__clicks[chain[ci]]) {
+    if (ev.type === "click" && globalThis.__clicks[chain[ci]]) {
       globalThis.__clicks[chain[ci]].call(ev.currentTarget, ev);
       fired++;
     }
   }
+  ev.currentTarget = null;
   return fired > 0;
+}
+globalThis.__fire = function (type, targetPath, xs, ys, key) {
+  var ev = new Event(type, { bubbles: true, cancelable: true });
+  ev.clientX = parseFloat(xs);
+  ev.clientY = parseFloat(ys);
+  ev.key = key === undefined ? "" : String(key);
+  ev.button = 0;
+  return dispatch(ev, targetPath);
+};
+globalThis.__move = function (path, xs, ys) {
+  var prev = globalThis.__hover === undefined ? null : globalThis.__hover;
+  var next = path === "" ? null : path;
+  if (prev === next) return false;
+  var x = parseFloat(xs);
+  var y = parseFloat(ys);
+  if (prev !== null) {
+    var out = new Event("mouseout", { bubbles: true, cancelable: true });
+    out.clientX = x;
+    out.clientY = y;
+    out.button = 0;
+    out.relatedTarget = next === null ? null : el(next);
+    dispatch(out, prev);
+  }
+  if (next !== null) {
+    var over = new Event("mouseover", { bubbles: true, cancelable: true });
+    over.clientX = x;
+    over.clientY = y;
+    over.button = 0;
+    over.relatedTarget = prev === null ? null : el(prev);
+    dispatch(over, next);
+  }
+  globalThis.__hover = next;
+  return true;
 };
 function el(p) {
   var w = {
@@ -259,6 +295,10 @@ function el(p) {
     removeEventListener: function(type, fn, capture) {
       dropLs(this.__path, type, fn, capture);
     },
+    dispatchEvent: function(ev) {
+      if (!(ev instanceof Event)) throw new TypeError("dispatchEvent requires an Event");
+      return dispatch(ev, this.__path);
+    },
     get onclick() {
       return globalThis.__clicks[this.__path] || null;
     },
@@ -328,6 +368,10 @@ globalThis.document = {
   },
   removeEventListener: function(type, fn, capture) {
     dropLs("", type, fn, capture);
+  },
+  dispatchEvent: function(ev) {
+    if (!(ev instanceof Event)) throw new TypeError("dispatchEvent requires an Event");
+    return dispatch(ev, "");
   },
   get body() {
     var p = __doc_body();
