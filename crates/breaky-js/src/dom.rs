@@ -2,7 +2,7 @@ use std::ffi::CStr;
 use std::os::raw::{c_char, c_int, c_void};
 
 use html::{inner_html, parse, Node, NodeKind};
-use style::query_first;
+use style::query_all;
 
 use super::{
     breaky_free_value, breaky_is_exception, breaky_to_cstring, cstr, to_string,
@@ -28,7 +28,9 @@ const FUNCTIONS: &[(&str, JSCFunction)] = &[
     ("__doc_by_id", doc_by_id),
     ("__doc_body", doc_body),
     ("__doc_create", doc_create),
+    ("__doc_create_text", doc_create_text),
     ("__doc_query", doc_query),
+    ("__doc_query_all", doc_query_all),
     ("__el_tag", el_tag),
     ("__el_attr", el_attr),
     ("__el_set_attr", el_set_attr),
@@ -39,6 +41,11 @@ const FUNCTIONS: &[(&str, JSCFunction)] = &[
     ("__el_set_html", el_set_html),
     ("__el_text", el_text),
     ("__el_set_text", el_set_text),
+    ("__el_query", el_query_one),
+    ("__el_query_all", el_query_all),
+    ("__el_clone", el_clone),
+    ("__text_data", text_data),
+    ("__text_set_data", text_set_data),
     ("__style_get", style_get),
     ("__style_set", style_set),
 ];
@@ -533,6 +540,7 @@ unsafe extern "C" fn doc_create(
     }));
     js_string(ctx, &format!("!{}", slot))
 }
+
 unsafe extern "C" fn doc_query(
     ctx: *mut JSContext,
     _this: JSValue,
@@ -542,10 +550,162 @@ unsafe extern "C" fn doc_query(
     let st = opaque(ctx);
     let sel = arg(ctx, argc, argv, 0);
     let root = unsafe { &*st.root };
-    match query_first(root, &sel) {
+    match query_all(root, &sel).into_iter().next() {
         Some(p) => js_string(ctx, &encode_path(&p)),
         None => js_null(),
     }
+}
+
+unsafe extern "C" fn doc_query_all(
+    ctx: *mut JSContext,
+    _this: JSValue,
+    argc: c_int,
+    argv: *const JSValue,
+) -> JSValue {
+    let st = opaque(ctx);
+    let sel = arg(ctx, argc, argv, 0);
+    let root = unsafe { &*st.root };
+    let paths: Vec<String> = query_all(root, &sel)
+        .iter()
+        .map(|p| encode_path(p))
+        .collect();
+    js_string(ctx, &json_paths(&paths))
+}
+
+unsafe extern "C" fn el_query_one(
+    ctx: *mut JSContext,
+    _this: JSValue,
+    argc: c_int,
+    argv: *const JSValue,
+) -> JSValue {
+    let st = opaque(ctx);
+    let p = arg(ctx, argc, argv, 0);
+    let sel = arg(ctx, argc, argv, 1);
+    match decode_path(&p).and_then(|s| query_keys(st, &s, &sel).into_iter().next()) {
+        Some(k) => js_string(ctx, &k),
+        None => js_null(),
+    }
+}
+
+unsafe extern "C" fn el_query_all(
+    ctx: *mut JSContext,
+    _this: JSValue,
+    argc: c_int,
+    argv: *const JSValue,
+) -> JSValue {
+    let st = opaque(ctx);
+    let p = arg(ctx, argc, argv, 0);
+    let sel = arg(ctx, argc, argv, 1);
+    let keys = match decode_path(&p) {
+        Some(s) => query_keys(st, &s, &sel),
+        None => Vec::new(),
+    };
+    js_string(ctx, &json_paths(&keys))
+}
+
+fn query_keys(st: &DomState, base: &Slot, sel: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    match base {
+        Slot::Tree(bp) => {
+            let root = unsafe { &*st.root };
+            for p in query_all(root, sel) {
+                if p.len() > bp.len() && p[..bp.len()] == bp[..] {
+                    out.push(encode_path(&p));
+                }
+            }
+        }
+        Slot::Parked { slot, inner } => {
+            if let Some(n) = st.parking.get(*slot).and_then(|s| s.as_ref()) {
+                for p in query_all(n, sel) {
+                    if p.len() > inner.len() && p[..inner.len()] == inner[..] {
+                        out.push(format!("!{}.{}", slot, encode_path(&p)));
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+fn json_paths(paths: &[String]) -> String {
+    let inner: Vec<String> = paths.iter().map(|p| format!("\"{}\"", p)).collect();
+    format!("[{}]", inner.join(","))
+}
+
+fn clone_node(n: &Node, deep: bool) -> Node {
+    let mut out = Node::new(n.kind.clone());
+    if deep {
+        for c in &n.children {
+            out.children.push(clone_node(c, true));
+        }
+    }
+    out
+}
+
+unsafe extern "C" fn doc_create_text(
+    ctx: *mut JSContext,
+    _this: JSValue,
+    argc: c_int,
+    argv: *const JSValue,
+) -> JSValue {
+    let st = opaque(ctx);
+    let data = arg(ctx, argc, argv, 0);
+    let slot = park(st, Node::new(NodeKind::Text(data)));
+    js_string(ctx, &format!("!{}", slot))
+}
+
+unsafe extern "C" fn el_clone(
+    ctx: *mut JSContext,
+    _this: JSValue,
+    argc: c_int,
+    argv: *const JSValue,
+) -> JSValue {
+    let st = opaque(ctx);
+    let p = arg(ctx, argc, argv, 0);
+    let deep = arg(ctx, argc, argv, 1) == "true";
+    let s = match decode_path(&p) {
+        Some(s) => s,
+        None => return js_null(),
+    };
+    let copy = match owner_mut(st, &s) {
+        Some(n) => clone_node(n, deep),
+        None => return js_null(),
+    };
+    let slot = park(st, copy);
+    js_string(ctx, &format!("!{}", slot))
+}
+
+unsafe extern "C" fn text_data(
+    ctx: *mut JSContext,
+    _this: JSValue,
+    argc: c_int,
+    argv: *const JSValue,
+) -> JSValue {
+    let st = opaque(ctx);
+    let p = arg(ctx, argc, argv, 0);
+    let s = with_any(st, &p, |n| match &n.kind {
+        NodeKind::Text(t) => t.clone(),
+        _ => String::new(),
+    })
+    .unwrap_or_default();
+    js_string(ctx, &s)
+}
+
+unsafe extern "C" fn text_set_data(
+    ctx: *mut JSContext,
+    _this: JSValue,
+    argc: c_int,
+    argv: *const JSValue,
+) -> JSValue {
+    let st = opaque(ctx);
+    let p = arg(ctx, argc, argv, 0);
+    let v = arg(ctx, argc, argv, 1);
+    with_any(st, &p, |n| {
+        if let NodeKind::Text(t) = &mut n.kind {
+            *t = v.clone();
+        }
+    });
+    js_undefined()
 }
 
 unsafe extern "C" fn el_append(
@@ -1646,5 +1806,197 @@ mod tests {
             .dispatch_event("click", &path, 0.0, 0.0)
             .unwrap_err()
             .contains("TypeError"));
+    }
+
+    #[test]
+    fn query_selector_all_lists_matches_in_order() {
+        let mut dom = parse(
+            "<html><body><ul id=\"list\"><li class=\"on\">a</li><li>b</li><li class=\"on\">c</li></ul></body></html>",
+        );
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        assert_eq!(
+            rt.eval("document.querySelectorAll('li').length").unwrap(),
+            "3"
+        );
+        assert_eq!(
+            rt.eval("var q = document.querySelectorAll('li.on'); q.length + ':' + q[0].textContent + ':' + q[1].textContent").unwrap(),
+            "2:a:c"
+        );
+        assert_eq!(
+            rt.eval("document.querySelectorAll('p').length").unwrap(),
+            "0"
+        );
+        assert_eq!(
+            rt.eval("document.querySelectorAll('.on, li').length").unwrap(),
+            "3"
+        );
+        assert_eq!(
+            rt.eval("document.querySelectorAll('ul li.on').length").unwrap(),
+            "2"
+        );
+    }
+
+    #[test]
+    fn element_query_scopes_to_subtree_with_document_context() {
+        let mut dom = parse(
+            "<html><body><ul id=\"a\"><li>one</li></ul><ul id=\"b\"><li>two</li><li>three</li></ul></body></html>",
+        );
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        assert_eq!(
+            rt.eval("document.getElementById('a').querySelectorAll('li').length")
+                .unwrap(),
+            "1"
+        );
+        assert_eq!(
+            rt.eval("document.getElementById('b').querySelectorAll('li')[1].textContent")
+                .unwrap(),
+            "three"
+        );
+        assert_eq!(
+            rt.eval("document.getElementById('a').querySelectorAll('ul').length")
+                .unwrap(),
+            "0"
+        );
+        assert_eq!(
+            rt.eval("document.getElementById('a').querySelector('li').textContent")
+                .unwrap(),
+            "one"
+        );
+        assert_eq!(
+            rt.eval("document.getElementById('a').querySelector('li b') === null")
+                .unwrap(),
+            "true"
+        );
+        assert_eq!(
+            rt.eval("document.querySelectorAll('ul li').length").unwrap(),
+            "3"
+        );
+    }
+
+    #[test]
+    fn create_text_node_appends_and_mutates() {
+        let mut dom = tree();
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        rt.eval(
+            "var t = document.createTextNode('ZZ'); document.getElementById('a').appendChild(t)",
+        )
+        .unwrap();
+        assert_eq!(
+            by_id(&dom, "a").children,
+            vec![
+                Node::new(NodeKind::Text("hi".into())),
+                Node::new(NodeKind::Text("ZZ".into()))
+            ]
+        );
+        assert_eq!(rt.eval("t.data").unwrap(), "ZZ");
+        assert_eq!(rt.eval("t.nodeType").unwrap(), "3");
+        rt.eval("t.data = 'YY'").unwrap();
+        assert_eq!(
+            by_id(&dom, "a").children,
+            vec![
+                Node::new(NodeKind::Text("hi".into())),
+                Node::new(NodeKind::Text("YY".into()))
+            ]
+        );
+        assert_eq!(rt.eval("t.textContent").unwrap(), "YY");
+    }
+
+    #[test]
+    fn text_node_moves_between_parents() {
+        let mut dom = tree();
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        rt.eval("var t = document.createTextNode('x'); document.getElementById('a').appendChild(t); document.getElementById('b').appendChild(t)")
+            .unwrap();
+        assert_eq!(
+            by_id(&dom, "a").children,
+            vec![Node::new(NodeKind::Text("hi".into()))]
+        );
+        assert_eq!(
+            by_id(&dom, "b").children,
+            vec![
+                Node::new(NodeKind::Text("yo".into())),
+                Node::new(NodeKind::Text("x".into()))
+            ]
+        );
+    }
+
+    #[test]
+    fn clone_node_shallow_and_deep() {
+        let mut dom = parse(
+            "<html><body><div id=\"a\"><b>x</b><i>y</i></div></body></html>",
+        );
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        rt.eval(
+            "var c = document.getElementById('a').cloneNode(false); document.body.appendChild(c)",
+        )
+        .unwrap();
+        let body = by_name(&dom, "body");
+        assert_eq!(body.children.len(), 2);
+        assert!(has_id(&body.children[1], "a"));
+        assert_eq!(body.children[1].children.len(), 0);
+        rt.eval(
+            "var d = document.getElementById('a').cloneNode(true); d.setAttribute('id', 'copy'); document.body.appendChild(d)",
+        )
+        .unwrap();
+        let body = by_name(&dom, "body");
+        assert_eq!(body.children.len(), 3);
+        let copy = &body.children[2];
+        assert_eq!(copy.children.len(), 2);
+        assert_eq!(copy.children[0].name(), Some("b"));
+        assert_eq!(
+            copy.children[0].children,
+            vec![Node::new(NodeKind::Text("x".into()))]
+        );
+        assert_eq!(
+            rt.eval("document.getElementById('copy').querySelectorAll('b, i').length")
+                .unwrap(),
+            "2"
+        );
+    }
+
+    #[test]
+    fn clone_works_for_parked_and_text_nodes() {
+        let mut dom = tree();
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        rt.eval(
+            "var e = document.createElement('section'); e.innerHTML = '<em class=\"z\">q</em>';",
+        )
+        .unwrap();
+        assert_eq!(
+            rt.eval("e.querySelectorAll('.z').length").unwrap(),
+            "1",
+            "query over parked subtree"
+        );
+        rt.eval(
+            "var c = e.cloneNode(true); c.setAttribute('id', 'dup'); document.body.appendChild(c)",
+        )
+        .unwrap();
+        assert_eq!(
+            rt.eval("document.getElementById('dup').querySelectorAll('.z').length")
+                .unwrap(),
+            "1"
+        );
+        rt.eval("var t = document.createTextNode('v'); var tc = t.cloneNode(); document.getElementById('a').appendChild(t); document.getElementById('b').appendChild(tc)")
+            .unwrap();
+        assert_eq!(
+            by_id(&dom, "a").children,
+            vec![
+                Node::new(NodeKind::Text("hi".into())),
+                Node::new(NodeKind::Text("v".into()))
+            ]
+        );
+        assert_eq!(
+            by_id(&dom, "b").children,
+            vec![
+                Node::new(NodeKind::Text("yo".into())),
+                Node::new(NodeKind::Text("v".into()))
+            ]
+        );
     }
 }

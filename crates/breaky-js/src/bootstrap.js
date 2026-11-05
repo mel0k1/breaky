@@ -186,6 +186,18 @@ function el(p) {
     setAttribute: function(n, v) {
       __el_set_attr(this.__path, String(n), String(v));
     },
+    nodeType: 1,
+    querySelector: function(sel) {
+      var p = __el_query(this.__path, String(sel));
+      return p === null ? null : el(p);
+    },
+    querySelectorAll: function(sel) {
+      return toEls(__el_query_all(this.__path, String(sel)));
+    },
+    cloneNode: function(deep) {
+      var p = __el_clone(this.__path, deep === true);
+      return p === null ? null : el(p);
+    },
     appendChild: function(c) {
       if (!c || typeof c.__path !== "string") return null;
       var cp = c.__path;
@@ -243,6 +255,36 @@ function el(p) {
   globalThis.__els.push(w);
   return w;
 }
+function toEls(raw) {
+  var ps = JSON.parse(raw);
+  var out = [];
+  for (var i = 0; i < ps.length; i++) out.push(el(ps[i]));
+  return out;
+}
+function txt(p) {
+  var w = {
+    __path: p,
+    nodeType: 3,
+    get data() {
+      return __text_data(this.__path);
+    },
+    set data(v) {
+      __text_set_data(this.__path, String(v));
+    },
+    get textContent() {
+      return __text_data(this.__path);
+    },
+    set textContent(v) {
+      __text_set_data(this.__path, String(v));
+    },
+    cloneNode: function() {
+      var np = __el_clone(this.__path, true);
+      return np === null ? null : txt(np);
+    },
+  };
+  globalThis.__els.push(w);
+  return w;
+}
 globalThis.document = {
   getElementById: function(id) {
     var p = __doc_by_id(String(id));
@@ -252,9 +294,16 @@ globalThis.document = {
     var p = __doc_create(String(tag));
     return p === null ? null : el(p);
   },
+  createTextNode: function(data) {
+    var p = __doc_create_text(String(data));
+    return p === null ? null : txt(p);
+  },
   querySelector: function(sel) {
     var p = __doc_query(String(sel));
     return p === null ? null : el(p);
+  },
+  querySelectorAll: function(sel) {
+    return toEls(__doc_query_all(String(sel)));
   },
   get body() {
     var p = __doc_body();

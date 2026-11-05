@@ -716,38 +716,43 @@ pub fn transition_merge<'a>(
 }
 
 pub fn query_first(root: &Node, selector: &str) -> Option<Vec<usize>> {
-    let sheet = css::parse(&format!("{}{{}}", selector));
-    let mut path = Vec::new();
-    let mut chain: Vec<&Node> = Vec::new();
-    for rule in &sheet.rules {
-        for s in &rule.selectors {
-            if let Some(p) = query_walk(root, s, &mut chain, &mut path) {
-                return Some(p);
-            }
-        }
-    }
-    None
+    query_all(root, selector).into_iter().next()
 }
 
-fn query_walk<'a>(
+pub fn query_all(root: &Node, selector: &str) -> Vec<Vec<usize>> {
+    let sheet = css::parse(&format!("{}{{}}", selector));
+    let mut sels: Vec<&Selector> = Vec::new();
+    for rule in &sheet.rules {
+        for s in &rule.selectors {
+            sels.push(s);
+        }
+    }
+    let mut out = Vec::new();
+    let mut path = Vec::new();
+    let mut chain: Vec<&Node> = Vec::new();
+    query_all_walk(root, &sels, &mut chain, &mut path, &mut out);
+    out
+}
+
+fn query_all_walk<'a>(
     node: &'a Node,
-    s: &Selector,
+    sels: &[&Selector],
     chain: &mut Vec<&'a Node>,
     path: &mut Vec<usize>,
-) -> Option<Vec<usize>> {
-    if matches!(node.kind, NodeKind::Element { .. }) && selector_matches(node, s, chain) {
-        return Some(path.clone());
+    out: &mut Vec<Vec<usize>>,
+) {
+    if matches!(node.kind, NodeKind::Element { .. })
+        && sels.iter().any(|s| selector_matches(node, s, chain))
+    {
+        out.push(path.clone());
     }
     for (i, c) in node.children.iter().enumerate() {
         path.push(i);
         chain.push(node);
-        if let Some(p) = query_walk(c, s, chain, path) {
-            return Some(p);
-        }
+        query_all_walk(c, sels, chain, path, out);
         chain.pop();
         path.pop();
     }
-    None
 }
 
 fn selector_matches(node: &Node, s: &Selector, ancestors: &[&Node]) -> bool {
@@ -1370,5 +1375,26 @@ mod tests {
         assert_eq!(query_first(&dom, "li.on"), Some(vec![0, 0, 0]));
         assert_eq!(query_first(&dom, "ul li"), Some(vec![0, 0, 0]));
         assert_eq!(query_first(&dom, "ol li"), None);
+    }
+
+    #[test]
+    fn query_all_collects_every_match_in_document_order() {
+        let dom = parse_html(
+            "<body><ul id=\"a\"><li class=\"on\">x</li><li>y</li><li class=\"on\">z</li></ul></body>",
+        );
+        assert_eq!(
+            query_all(&dom, "li.on"),
+            vec![vec![0, 0, 0], vec![0, 0, 2]]
+        );
+        assert_eq!(query_all(&dom, "li").len(), 3);
+        assert_eq!(query_all(&dom, "p").len(), 0);
+    }
+
+    #[test]
+    fn query_all_dedupes_comma_selectors() {
+        let dom = parse_html("<body><p class=\"a\">1</p><p>2</p></body>");
+        assert_eq!(query_all(&dom, "p, .a").len(), 2);
+        assert_eq!(query_all(&dom, ".a, p").len(), 2);
+        assert_eq!(query_all(&dom, "body, body p").len(), 3);
     }
 }
