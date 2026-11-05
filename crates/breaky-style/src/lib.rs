@@ -715,6 +715,41 @@ pub fn transition_merge<'a>(
     }
 }
 
+pub fn query_first(root: &Node, selector: &str) -> Option<Vec<usize>> {
+    let sheet = css::parse(&format!("{}{{}}", selector));
+    let mut path = Vec::new();
+    let mut chain: Vec<&Node> = Vec::new();
+    for rule in &sheet.rules {
+        for s in &rule.selectors {
+            if let Some(p) = query_walk(root, s, &mut chain, &mut path) {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
+fn query_walk<'a>(
+    node: &'a Node,
+    s: &Selector,
+    chain: &mut Vec<&'a Node>,
+    path: &mut Vec<usize>,
+) -> Option<Vec<usize>> {
+    if matches!(node.kind, NodeKind::Element { .. }) && selector_matches(node, s, chain) {
+        return Some(path.clone());
+    }
+    for (i, c) in node.children.iter().enumerate() {
+        path.push(i);
+        chain.push(node);
+        if let Some(p) = query_walk(c, s, chain, path) {
+            return Some(p);
+        }
+        chain.pop();
+        path.pop();
+    }
+    None
+}
+
 fn selector_matches(node: &Node, s: &Selector, ancestors: &[&Node]) -> bool {
     chain_matches(node, ancestors, &s.compounds)
 }
@@ -1314,5 +1349,26 @@ mod tests {
         let to = build(&dom, &target);
         let mid = transition_merge(&from, &to, 0.5);
         assert!(near_c(&el(&mid, "p").computed["color"][0], 128, 0, 128));
+    }
+
+    #[test]
+    fn query_first_by_tag_id_class() {
+        let dom = parse_html("<div class=\"wrap\"><p id=\"a\">x</p><section><p>y</p></section></div>");
+        assert_eq!(query_first(&dom, "p"), Some(vec![0, 0]));
+        assert_eq!(query_first(&dom, "#a"), Some(vec![0, 0]));
+        assert_eq!(query_first(&dom, ".wrap"), Some(vec![0]));
+        assert_eq!(query_first(&dom, "section p"), Some(vec![0, 1, 0]));
+        assert_eq!(query_first(&dom, "div > p"), Some(vec![0, 0]));
+        assert_eq!(query_first(&dom, "*"), Some(vec![0]));
+        assert_eq!(query_first(&dom, "span"), None);
+        assert_eq!(query_first(&dom, "###"), None);
+    }
+
+    #[test]
+    fn query_first_matches_cascade_selectors() {
+        let dom = parse_html("<body><ul><li class=\"on\">a</li><li>b</li></ul></body>");
+        assert_eq!(query_first(&dom, "li.on"), Some(vec![0, 0, 0]));
+        assert_eq!(query_first(&dom, "ul li"), Some(vec![0, 0, 0]));
+        assert_eq!(query_first(&dom, "ol li"), None);
     }
 }

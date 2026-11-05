@@ -38,6 +38,7 @@ name = "breaky-js"
 version = "0.1.0"
 dependencies = [
  "breaky-html",
+ "breaky-style",
 ]
 
 [[package]]

@@ -2,10 +2,11 @@ use std::ffi::CStr;
 use std::os::raw::{c_char, c_int, c_void};
 
 use html::{inner_html, parse, Node, NodeKind};
+use style::query_first;
 
 use super::{
-    breaky_free_value, breaky_is_exception, breaky_to_cstring, cstr, to_string, JSContext,
-    JSCFunction, JSValue, JSValueUnion, EVAL_GLOBAL,
+    breaky_free_value, breaky_is_exception, breaky_to_cstring, cstr, to_string,
+    JSContext, JSCFunction, JSValue, JSValueUnion, EVAL_GLOBAL,
 };
 use super::{
     JS_Eval, JS_FreeCString, JS_GetContextOpaque, JS_GetException, JS_GetGlobalObject,
@@ -20,14 +21,18 @@ const CFUNC_GENERIC: c_int = 0;
 
 pub(super) struct DomState {
     root: *mut Node,
+    parking: Vec<Option<Node>>,
 }
 
 const FUNCTIONS: &[(&str, JSCFunction)] = &[
     ("__doc_by_id", doc_by_id),
     ("__doc_body", doc_body),
+    ("__doc_create", doc_create),
+    ("__doc_query", doc_query),
     ("__el_tag", el_tag),
     ("__el_attr", el_attr),
     ("__el_set_attr", el_set_attr),
+    ("__el_append", el_append),
     ("__el_html", el_html),
     ("__el_set_html", el_set_html),
     ("__el_text", el_text),
@@ -37,7 +42,10 @@ const FUNCTIONS: &[(&str, JSCFunction)] = &[
 ];
 
 pub(super) fn install(rt: &mut super::Runtime, root: &mut Node) {
-    let st = Box::into_raw(Box::new(DomState { root: root as *mut Node }));
+    let st = Box::into_raw(Box::new(DomState {
+        root: root as *mut Node,
+        parking: Vec::new(),
+    }));
     rt.dom = st;
     unsafe {
         JS_SetContextOpaque(rt.ctx, st as *mut c_void);
@@ -72,9 +80,9 @@ unsafe fn register(ctx: *mut JSContext, name: &str, f: JSCFunction) {
     breaky_free_value(ctx, global);
 }
 
-unsafe fn opaque(ctx: *mut JSContext) -> &'static DomState {
-    let p = JS_GetContextOpaque(ctx) as *const DomState;
-    &*p
+unsafe fn opaque(ctx: *mut JSContext) -> &'static mut DomState {
+    let p = JS_GetContextOpaque(ctx) as *mut DomState;
+    &mut *p
 }
 
 unsafe fn arg(ctx: *mut JSContext, argc: c_int, argv: *const JSValue, i: usize) -> String {
@@ -115,11 +123,40 @@ fn encode_path(p: &[usize]) -> String {
         .join(".")
 }
 
-fn decode_path(s: &str) -> Option<Vec<usize>> {
+enum Slot {
+    Tree(Vec<usize>),
+    Parked { slot: usize, inner: Vec<usize> },
+}
+
+fn decode_path(s: &str) -> Option<Slot> {
+    if let Some(rest) = s.strip_prefix('!') {
+        let mut it = rest.split('.');
+        let slot = it.next()?.parse::<usize>().ok()?;
+        let inner = it
+            .map(|x| x.parse::<usize>().ok())
+            .collect::<Option<Vec<_>>>()?;
+        return Some(Slot::Parked { slot, inner });
+    }
     if s.is_empty() {
         return None;
     }
-    s.split('.').map(|x| x.parse::<usize>().ok()).collect()
+    s.split('.')
+        .map(|x| x.parse::<usize>().ok())
+        .collect::<Option<Vec<_>>>()
+        .map(Slot::Tree)
+}
+
+fn slot_key(s: &Slot) -> String {
+    match s {
+        Slot::Tree(p) => encode_path(p),
+        Slot::Parked { slot, inner } => {
+            if inner.is_empty() {
+                format!("!{}", slot)
+            } else {
+                format!("!{}.{}", slot, encode_path(inner))
+            }
+        }
+    }
 }
 
 fn resolve_mut<'a>(root: &'a mut Node, path: &[usize]) -> Option<&'a mut Node> {
@@ -152,9 +189,75 @@ fn has_id(node: &Node, id: &str) -> bool {
     matches!(&node.kind, NodeKind::Element { attrs, .. } if attrs.iter().any(|(k, v)| k == "id" && v == id))
 }
 
-fn with_node<R>(st: &DomState, path: &str, f: impl FnOnce(&mut Node) -> R) -> Option<R> {
-    let p = decode_path(path)?;
-    resolve_mut(unsafe { &mut *st.root }, &p).map(f)
+fn with_any<R>(st: &mut DomState, path: &str, f: impl FnOnce(&mut Node) -> R) -> Option<R> {
+    match decode_path(path)? {
+        Slot::Tree(p) => resolve_mut(unsafe { &mut *st.root }, &p).map(f),
+        Slot::Parked { slot, inner } => {
+            let n = st.parking.get_mut(slot)?.as_mut()?;
+            resolve_mut(n, &inner).map(f)
+        }
+    }
+}
+
+fn owner_mut<'a>(st: &'a mut DomState, s: &Slot) -> Option<&'a mut Node> {
+    match s {
+        Slot::Tree(p) => resolve_mut(unsafe { &mut *st.root }, p),
+        Slot::Parked { slot, inner } => {
+            let n = st.parking.get_mut(*slot)?.as_mut()?;
+            resolve_mut(n, inner)
+        }
+    }
+}
+
+fn take_child(st: &mut DomState, cs: &Slot) -> Option<Node> {
+    match cs {
+        Slot::Parked { slot, inner } if inner.is_empty() => {
+            st.parking.get_mut(*slot).and_then(|s| s.take())
+        }
+        Slot::Parked { slot, inner } => {
+            let d = inner.len().checked_sub(1)?;
+            let p = owner_mut(
+                st,
+                &Slot::Parked {
+                    slot: *slot,
+                    inner: inner[..d].to_vec(),
+                },
+            )?;
+            if !matches!(p.kind, NodeKind::Element { .. }) || inner[d] >= p.children.len() {
+                return None;
+            }
+            Some(p.children.remove(inner[d]))
+        }
+        Slot::Tree(cpath) => {
+            let d = cpath.len().checked_sub(1)?;
+            let p = owner_mut(st, &Slot::Tree(cpath[..d].to_vec()))?;
+            if !matches!(p.kind, NodeKind::Element { .. }) || cpath[d] >= p.children.len() {
+                return None;
+            }
+            Some(p.children.remove(cpath[d]))
+        }
+    }
+}
+
+fn append(st: &mut DomState, ps: Slot, cs: Slot) -> Option<(String, Option<String>)> {
+    let mut parent = ps;
+    let mut moved_parent: Option<String> = None;
+    if let (Slot::Tree(ref ppath), Slot::Tree(cpath)) = (&parent, &cs) {
+        if ppath.len() >= cpath.len() && ppath[..cpath.len()] == cpath[..] {
+            return None;
+        }
+        let d = cpath.len() - 1;
+        if ppath.len() > d && ppath[..d] == cpath[..d] && ppath[d] > cpath[d] {
+            let mut fixed = ppath.clone();
+            fixed[d] -= 1;
+            moved_parent = Some(encode_path(&fixed));
+            parent = Slot::Tree(fixed);
+        }
+    }
+    let node = take_child(st, &cs)?;
+    let idx = owner_mut(st, &parent)?.children.len();
+    owner_mut(st, &parent)?.children.push(node);
+    Some((format!("{}.{}", slot_key(&parent), idx), moved_parent))
 }
 
 fn text_content(node: &Node, out: &mut String) {
@@ -249,6 +352,88 @@ unsafe extern "C" fn doc_body(
     }
 }
 
+unsafe extern "C" fn doc_create(
+    ctx: *mut JSContext,
+    _this: JSValue,
+    argc: c_int,
+    argv: *const JSValue,
+) -> JSValue {
+    let st = opaque(ctx);
+    let tag = arg(ctx, argc, argv, 0).to_lowercase();
+    let valid = tag
+        .chars()
+        .next()
+        .map(|c| c.is_ascii_alphabetic())
+        .unwrap_or(false);
+    if !valid {
+        return js_null();
+    }
+    let slot = match st.parking.iter().position(|s| s.is_none()) {
+        Some(i) => i,
+        None => {
+            st.parking.push(None);
+            st.parking.len() - 1
+        }
+    };
+    st.parking[slot] = Some(Node::new(NodeKind::Element {
+        name: tag,
+        attrs: Vec::new(),
+    }));
+    js_string(ctx, &format!("!{}", slot))
+}
+unsafe extern "C" fn doc_query(
+    ctx: *mut JSContext,
+    _this: JSValue,
+    argc: c_int,
+    argv: *const JSValue,
+) -> JSValue {
+    let st = opaque(ctx);
+    let sel = arg(ctx, argc, argv, 0);
+    let root = unsafe { &*st.root };
+    match query_first(root, &sel) {
+        Some(p) => js_string(ctx, &encode_path(&p)),
+        None => js_null(),
+    }
+}
+
+unsafe extern "C" fn el_append(
+    ctx: *mut JSContext,
+    this: JSValue,
+    argc: c_int,
+    argv: *const JSValue,
+) -> JSValue {
+    let st = opaque(ctx);
+    let pp = arg(ctx, argc, argv, 0);
+    let cp = arg(ctx, argc, argv, 1);
+    let ps = match decode_path(&pp) {
+        Some(s) => s,
+        None => return js_null(),
+    };
+    let cs = match decode_path(&cp) {
+        Some(s) => s,
+        None => return js_null(),
+    };
+    let Some((child_path, parent_fix)) = append(st, ps, cs) else {
+        return js_null();
+    };
+    if argc >= 3 {
+        set_path_prop(ctx, *argv.add(2), &child_path);
+    }
+    if let Some(fixed) = parent_fix {
+        set_path_prop(ctx, this, &fixed);
+    }
+    js_string(ctx, &child_path)
+}
+
+unsafe fn set_path_prop(ctx: *mut JSContext, obj: JSValue, path: &str) {
+    if obj.tag == TAG_NULL || obj.tag == TAG_UNDEFINED {
+        return;
+    }
+    let key = cstr("__path");
+    let val = js_string(ctx, path);
+    JS_SetPropertyStr(ctx, obj, key.as_ptr(), val);
+}
+
 unsafe extern "C" fn el_tag(
     ctx: *mut JSContext,
     _this: JSValue,
@@ -257,7 +442,7 @@ unsafe extern "C" fn el_tag(
 ) -> JSValue {
     let st = opaque(ctx);
     let p = arg(ctx, argc, argv, 0);
-    match with_node(st, &p, |n| n.name().map(|s| s.to_string())) {
+    match with_any(st, &p, |n| n.name().map(|s| s.to_string())) {
         Some(Some(name)) => js_string(ctx, &name),
         _ => js_null(),
     }
@@ -272,7 +457,7 @@ unsafe extern "C" fn el_attr(
     let st = opaque(ctx);
     let p = arg(ctx, argc, argv, 0);
     let name = arg(ctx, argc, argv, 1).to_lowercase();
-    let found = with_node(st, &p, |node| match &node.kind {
+    let found = with_any(st, &p, |node| match &node.kind {
         NodeKind::Element { attrs, .. } => {
             attrs.iter().find(|(k, _)| *k == name).map(|(_, v)| v.clone())
         }
@@ -296,7 +481,7 @@ unsafe extern "C" fn el_set_attr(
     let name = arg(ctx, argc, argv, 1).to_lowercase();
     let val = arg(ctx, argc, argv, 2);
     if !name.is_empty() {
-        with_node(st, &p, |node| {
+        with_any(st, &p, |node| {
             if let NodeKind::Element { attrs, .. } = &mut node.kind {
                 upsert_attr(attrs, &name, val);
             }
@@ -313,7 +498,7 @@ unsafe extern "C" fn el_html(
 ) -> JSValue {
     let st = opaque(ctx);
     let p = arg(ctx, argc, argv, 0);
-    match with_node(st, &p, |node| inner_html(node)) {
+    match with_any(st, &p, |node| inner_html(node)) {
         Some(s) => js_string(ctx, &s),
         None => js_string(ctx, ""),
     }
@@ -328,7 +513,7 @@ unsafe extern "C" fn el_set_html(
     let st = opaque(ctx);
     let p = arg(ctx, argc, argv, 0);
     let frag = arg(ctx, argc, argv, 1);
-    with_node(st, &p, |node| {
+    with_any(st, &p, |node| {
         if matches!(node.kind, NodeKind::Element { .. }) {
             node.children = parse(&frag).children;
         }
@@ -344,7 +529,7 @@ unsafe extern "C" fn el_text(
 ) -> JSValue {
     let st = opaque(ctx);
     let p = arg(ctx, argc, argv, 0);
-    let s = with_node(st, &p, |node| {
+    let s = with_any(st, &p, |node| {
         let mut out = String::new();
         text_content(node, &mut out);
         out
@@ -362,7 +547,7 @@ unsafe extern "C" fn el_set_text(
     let st = opaque(ctx);
     let p = arg(ctx, argc, argv, 0);
     let text = arg(ctx, argc, argv, 1);
-    with_node(st, &p, |node| {
+    with_any(st, &p, |node| {
         if matches!(node.kind, NodeKind::Element { .. }) {
             node.children = vec![Node::new(NodeKind::Text(text))];
         }
@@ -379,7 +564,7 @@ unsafe extern "C" fn style_get(
     let st = opaque(ctx);
     let p = arg(ctx, argc, argv, 0);
     let name = arg(ctx, argc, argv, 1).to_lowercase();
-    let v = with_node(st, &p, |node| {
+    let v = with_any(st, &p, |node| {
         parse_style(attr_slice(node))
             .into_iter()
             .find(|(k, _)| *k == name)
@@ -402,7 +587,7 @@ unsafe extern "C" fn style_set(
     let p = arg(ctx, argc, argv, 0);
     let name = arg(ctx, argc, argv, 1);
     let val = arg(ctx, argc, argv, 2);
-    with_node(st, &p, |node| set_style_prop(node, &name, &val));
+    with_any(st, &p, |node| set_style_prop(node, &name, &val));
     js_undefined()
 }
 
@@ -661,6 +846,166 @@ mod tests {
         assert_eq!(
             rt.eval("document.getElementById('a').innerHTML").unwrap(),
             "<i>one</i>"
+        );
+    }
+
+    #[test]
+    fn create_append_read_back() {
+        let mut dom = tree();
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        rt.eval(
+            "var d = document.createElement('div'); d.setAttribute('class', 'new'); d.textContent = 'made in js'; document.body.appendChild(d)",
+        )
+        .unwrap();
+        let body = by_name(&dom, "body");
+        assert_eq!(body.children.len(), 3);
+        match &body.children[2].kind {
+            NodeKind::Element { name, attrs } => {
+                assert_eq!(name, "div");
+                assert!(attrs.contains(&("class".into(), "new".into())));
+            }
+            _ => panic!(),
+        }
+        assert_eq!(
+            body.children[2].children,
+            vec![Node::new(NodeKind::Text("made in js".into()))]
+        );
+        assert_eq!(
+            rt.eval("document.querySelector('div.new').textContent")
+                .unwrap(),
+            "made in js"
+        );
+    }
+
+    #[test]
+    fn detached_attrs_persist_until_insert() {
+        let mut dom = tree();
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        rt.eval(
+            "var d = document.createElement('p'); d.style.color = 'red'; d.setAttribute('data-x', '1'); document.body.appendChild(d)",
+        )
+        .unwrap();
+        let body = by_name(&dom, "body");
+        match &body.children[2].kind {
+            NodeKind::Element { attrs, .. } => {
+                assert!(attrs.contains(&("style".into(), "color: red".into())));
+                assert!(attrs.contains(&("data-x".into(), "1".into())));
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn append_moves_existing_node() {
+        let mut dom = parse(
+            "<html><body><div id=\"a\"><p id=\"x\">1</p><p id=\"y\">2</p></div></body></html>",
+        );
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        rt.eval("document.getElementById('a').appendChild(document.getElementById('x'))")
+            .unwrap();
+        let div = by_id(&dom, "a");
+        assert_eq!(div.children.len(), 2);
+        assert_eq!(div.children[0].name(), Some("p"));
+        match &div.children[0].kind {
+            NodeKind::Element { attrs, .. } => {
+                assert!(attrs.iter().any(|(k, v)| k == "id" && v == "y"));
+            }
+            _ => panic!(),
+        }
+        assert_eq!(
+            div.children[1].name(),
+            Some("p"),
+            "moved node must be last"
+        );
+        assert_eq!(
+            rt.eval("document.querySelector('#a p').textContent").unwrap(),
+            "2"
+        );
+    }
+
+    #[test]
+    fn append_rejects_cycles() {
+        let mut dom = parse(
+            "<html><body><div id=\"a\"><p id=\"x\">1</p></div></body></html>",
+        );
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        assert_eq!(
+            rt.eval("document.getElementById('a').appendChild(document.getElementById('a')) === null")
+                .unwrap(),
+            "true"
+        );
+        assert_eq!(
+            rt.eval("document.getElementById('x').appendChild(document.getElementById('a')) === null")
+                .unwrap(),
+            "true"
+        );
+        let div = by_id(&dom, "a");
+        assert_eq!(div.children.len(), 1);
+    }
+
+    #[test]
+    fn append_returns_valid_wrapper() {
+        let mut dom = tree();
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        rt.eval("var w = document.body.appendChild(document.createElement('b')); w.textContent = 'after'")
+            .unwrap();
+        let body = by_name(&dom, "body");
+        assert_eq!(body.children[2].name(), Some("b"));
+        assert_eq!(
+            body.children[2].children,
+            vec![Node::new(NodeKind::Text("after".into()))]
+        );
+    }
+
+    #[test]
+    fn detached_parent_chain() {
+        let mut dom = tree();
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        rt.eval(
+            "var p = document.createElement('p'); var b = document.createElement('b'); p.appendChild(b); b.textContent = 'deep'; document.body.appendChild(p)",
+        )
+        .unwrap();
+        let body = by_name(&dom, "body");
+        assert_eq!(body.children[2].name(), Some("p"));
+        assert_eq!(body.children[2].children[0].name(), Some("b"));
+        assert_eq!(
+            body.children[2].children[0].children,
+            vec![Node::new(NodeKind::Text("deep".into()))]
+        );
+    }
+
+    #[test]
+    fn query_selector_bindings() {
+        let mut dom = parse(
+            "<html><body><ul id=\"list\"><li class=\"on\">a</li><li>b</li></ul></body></html>",
+        );
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        assert_eq!(
+            rt.eval("document.querySelector('.on').textContent").unwrap(),
+            "a"
+        );
+        assert_eq!(
+            rt.eval("document.querySelector('#list').tagName").unwrap(),
+            "UL"
+        );
+        assert_eq!(
+            rt.eval("document.querySelector('ul li').tagName").unwrap(),
+            "LI"
+        );
+        assert_eq!(
+            rt.eval("document.querySelector('ol li') === null").unwrap(),
+            "true"
+        );
+        assert_eq!(
+            rt.eval("document.querySelector('###') === null").unwrap(),
+            "true"
         );
     }
 }

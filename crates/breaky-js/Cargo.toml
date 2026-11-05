@@ -7,3 +7,4 @@ build = "build.rs"
 
 [dependencies]
 breaky-html = { path = "../breaky-html" }
+breaky-style = { path = "../breaky-style" }

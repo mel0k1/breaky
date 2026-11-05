@@ -11,7 +11,12 @@ var card = document.getElementById("card");
 card.innerHTML = "mutated by <b>QuickJS</b>: getElementById, innerHTML, style";
 card.style.background = "#fff2dd";
 card.style["border-color"] = "#c98a2d";
-console.log("card", card.getAttribute("id"), card.textContent.length);
+var extra = document.createElement("p");
+extra.textContent = "built with createElement + appendChild";
+document.body.appendChild(extra);
+var found = document.querySelector("#card b");
+found.style.color = "#7a1fa2";
+console.log("found", found.tagName, found.textContent.length);
 </script>
 </body>
 </html>
