@@ -8,3 +8,9 @@ button {
 #msg {
     color: #24435c;
 }
+#panel {
+    width: 420px;
+    padding: 24px;
+    background: #eef3f8;
+    border: 2px solid #336699;
+}

@@ -26,8 +26,9 @@ given time in seconds, honoring `transition` on either side. The `anim`
 command dumps every frame of an image (local path or URL) as numbered PNGs
 and prints each frame delay in milliseconds. The `animate` command renders a
 whole page on a timer, stepping every animated GIF at its frame delay, for a
-local file or a remote URL. The `click` command finds an element by a CSS
-selector, fires its `onclick` handler and paints the result. Scripts in
+local file or a remote URL. The `click` command fires a click on an element
+found by a CSS selector (at its rendered center) or at raw `X,Y` coordinates
+hit-tested against the layout boxes, then paints the result. Scripts in
 `<script>` tags (inline or `src`, local or remote) run in an embedded
 QuickJS engine and print through `console.log`. Scripts get live DOM
 bindings — `document.getElementById`, `document.body`, `querySelector`,
@@ -121,8 +122,9 @@ Workspace of small crates:
 - [x] QuickJS scripting (`<script>` inline and src, console.log)
 - [x] DOM bindings (getElementById, innerHTML, textContent, attributes, inline styles)
 - [x] DOM construction (createElement, appendChild, insertBefore, removeChild, querySelector, stable wrappers across mutations)
-- [x] Events (onclick handlers, `breaky click <selector>` command)
+- [x] Events (onclick handlers, `breaky click <selector|X,Y>` command)
 - [x] addEventListener/removeEventListener with capture and bubbling, event object with click coordinates
+- [x] Hit-testing: click coordinates resolved to DOM nodes through the layout boxes
 
 ## License
 

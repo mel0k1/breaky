@@ -1,19 +1,23 @@
 <!DOCTYPE html>
 <html>
 <head>
-<title>onclick</title>
+<title>events</title>
 </head>
 <body>
-<h1>onclick</h1>
+<h1>events</h1>
 <p id="msg">waiting for click</p>
-<button id="btn">go</button>
+<div id="panel">
+  <button id="btn">go</button>
+</div>
 <script>
-document.getElementById("btn").onclick = function () {
-  var msg = document.getElementById("msg");
-  msg.textContent = "clicked through the pipeline";
+var msg = document.getElementById("msg");
+document.getElementById("btn").addEventListener("click", function (ev) {
+  this.textContent = "clicked at " + Math.round(ev.clientX) + "," + Math.round(ev.clientY);
+});
+document.getElementById("panel").addEventListener("click", function (ev) {
+  msg.textContent = "panel saw " + ev.type + " on " + ev.target.tagName + " at " + Math.round(ev.clientX) + "," + Math.round(ev.clientY);
   msg.style.color = "#aa2222";
-  msg.style["font-weight"] = "bold";
-};
+});
 </script>
 </body>
 </html>

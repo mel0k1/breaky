@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::path::Path;
@@ -83,7 +84,7 @@ fn click_cmd(args: &[String]) {
     let src = args.get(2).unwrap_or_else(|| usage());
     let remote = src.contains("://");
     let (si, vi, oi) = if remote { (3, 4, 5) } else { (4, 5, 6) };
-    let selector = args.get(si).unwrap_or_else(|| usage());
+    let target_arg = args.get(si).unwrap_or_else(|| usage());
     let viewport = args
         .get(vi)
         .and_then(|s| s.parse::<f32>().ok())
@@ -111,15 +112,7 @@ fn click_cmd(args: &[String]) {
         Some(b) => run_scripts(&scripts, &mut dom, Path::new("."), Some((&mut client, b))),
         None => run_scripts(&scripts, &mut dom, base_html, None),
     };
-    match style::query_first(&dom, selector) {
-        Some(p) => match rt.dispatch_event("click", &p, 0.0, 0.0) {
-            Ok(true) => {}
-            Ok(false) => eprintln!("{}: no click handler", selector),
-            Err(e) => eprintln!("{}", e),
-        },
-        None => eprintln!("{}: no match", selector),
-    }
-    let styled = build(&dom, &sheet);
+    let mut styled = build(&dom, &sheet);
     let mut imgs = img::Store::new();
     let mut anims = img::AnimStore::new();
     let mut urls: Vec<String> = Vec::new();
@@ -142,11 +135,147 @@ fn click_cmd(args: &[String]) {
             load_faces(&sheet, &styled, css_base, None);
         }
     }
+    let point = parse_point(target_arg);
+    let target: Option<Vec<usize>> = if let Some((x, y)) = point {
+        match layout::layout_with(&styled, viewport, &imgs) {
+            Some(tree) => {
+                let mut map = HashMap::new();
+                addr_paths(&dom, &mut map, &mut Vec::new());
+                match hit_test(&tree, x, y, &map) {
+                    Some(p) => Some(p),
+                    None => {
+                        eprintln!("no element at {},{}", x, y);
+                        None
+                    }
+                }
+            }
+            None => {
+                eprintln!("empty layout");
+                None
+            }
+        }
+    } else {
+        match style::query_first(&dom, target_arg) {
+            Some(p) => Some(p),
+            None => {
+                eprintln!("{}: no match", target_arg);
+                None
+            }
+        }
+    };
+    if let Some(p) = &target {
+        let (cx, cy) = match point {
+            Some(xy) => xy,
+            None => match layout::layout_with(&styled, viewport, &imgs) {
+                Some(tree) => box_center(&tree, node_at(&dom, p)).unwrap_or((0.0, 0.0)),
+                None => (0.0, 0.0),
+            },
+        };
+        match rt.dispatch_event("click", p, cx, cy) {
+            Ok(true) => {}
+            Ok(false) => eprintln!("{}: no click handler", target_arg),
+            Err(e) => eprintln!("{}", e),
+        }
+    }
+    styled = build(&dom, &sheet);
+    urls.clear();
+    gather_images(&styled, &mut urls);
+    srcs.clear();
+    gather_dom_images(&dom, &mut srcs);
+    match &base {
+        Some(b) => {
+            load_remote_images(&mut client, &urls, b, &mut imgs, &mut anims);
+            load_remote_images(&mut client, &srcs, b, &mut imgs, &mut anims);
+            load_faces(&sheet, &styled, Path::new("."), Some((&mut client, b)));
+        }
+        None => {
+            let css_base = args
+                .get(3)
+                .map(|p| Path::new(p).parent().unwrap_or(Path::new(".")))
+                .unwrap_or(Path::new("."));
+            load_local_images(&urls, css_base, &mut imgs, &mut anims);
+            load_local_images(&srcs, base_html, &mut imgs, &mut anims);
+            load_faces(&sheet, &styled, css_base, None);
+        }
+    }
     if let Some(tree) = layout::layout_with(&styled, viewport, &imgs) {
         let canvas = render::paint_with(&tree, viewport, &imgs);
         fs::write(out, canvas.to_png()).unwrap_or_else(fail);
         println!("saved {}", out);
     }
+}
+
+fn parse_point(s: &str) -> Option<(f32, f32)> {
+    let (a, b) = s.split_once(',')?;
+    let x = a.trim().parse::<f32>().ok()?;
+    let y = b.trim().parse::<f32>().ok()?;
+    Some((x, y))
+}
+
+fn addr_paths(dom: &Node, out: &mut HashMap<usize, Vec<usize>>, path: &mut Vec<usize>) {
+    out.insert(dom as *const Node as usize, path.clone());
+    for (i, c) in dom.children.iter().enumerate() {
+        path.push(i);
+        addr_paths(c, out, path);
+        path.pop();
+    }
+}
+
+fn node_at<'a>(root: &'a Node, path: &[usize]) -> &'a Node {
+    let mut cur = root;
+    for &i in path {
+        cur = &cur.children[i];
+    }
+    cur
+}
+
+fn box_node<'a>(b: &'a layout::LayoutBox<'a>) -> Option<&'a Node> {
+    match &b.kind {
+        layout::BoxKind::Block(s)
+        | layout::BoxKind::Inline(s)
+        | layout::BoxKind::InlineBlock(s)
+        | layout::BoxKind::Flex(s)
+        | layout::BoxKind::Table(s)
+        | layout::BoxKind::TableRow(s)
+        | layout::BoxKind::TableCell(s) => Some(s.node),
+        layout::BoxKind::Anonymous => None,
+    }
+}
+
+fn hit_test(
+    b: &layout::LayoutBox,
+    x: f32,
+    y: f32,
+    map: &HashMap<usize, Vec<usize>>,
+) -> Option<Vec<usize>> {
+    for c in b.children.iter().chain(b.abs.iter()) {
+        if let Some(p) = hit_test(c, x, y, map) {
+            return Some(p);
+        }
+    }
+    let node = box_node(b)?;
+    node.name()?;
+    let r = b.dims.border_box();
+    if x >= r.x && x <= r.x + r.width && y >= r.y && y <= r.y + r.height {
+        map.get(&(node as *const Node as usize)).cloned()
+    } else {
+        None
+    }
+}
+
+fn box_center(b: &layout::LayoutBox, node: &Node) -> Option<(f32, f32)> {
+    if let Some(n) = box_node(b) {
+        if std::ptr::eq(n, node) {
+            let r = b.dims.border_box();
+            return Some((r.x + r.width / 2.0, r.y + r.height / 2.0));
+        }
+    }
+    for c in b.children.iter().chain(b.abs.iter()) {
+        if let Some(p) = box_center(c, node) {
+            return Some(p);
+        }
+    }
+    None
 }
 
 fn transition_page(args: &[String]) {
@@ -702,7 +831,73 @@ fn usage() -> ! {
     eprintln!("       breaky anim <file|url> [prefix]");
     eprintln!("       breaky animate <file> [style.css] [width] [prefix]");
     eprintln!("       breaky animate <url> [width] [prefix]");
-    eprintln!("       breaky click <file> [style.css] <selector> [width] [out.png]");
-    eprintln!("       breaky click <url> <selector> [width] [out.png]");
+    eprintln!("       breaky click <file> [style.css] <selector|X,Y> [width] [out.png]");
+    eprintln!("       breaky click <url> <selector|X,Y> [width] [out.png]");
     exit(2);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn page() -> Node {
+        html::parse(
+            "<html><head><style>#outer{width:220px;height:110px;background:#3355aa;padding:10px}#inner{width:60px;height:40px;background:#cc4444}</style></head><body><div id=\"outer\"><div id=\"inner\"></div></div></body></html>",
+        )
+    }
+
+    #[test]
+    fn hit_test_finds_deepest_element() {
+        let dom = page();
+        let mut css_text = String::new();
+        style::collect_css(&dom, &mut css_text);
+        let sheet = css::parse(&css_text);
+        let styled = build(&dom, &sheet);
+        let tree = layout::layout_with(&styled, 800.0, &img::Store::new()).unwrap();
+        let mut map = HashMap::new();
+        addr_paths(&dom, &mut map, &mut Vec::new());
+        let inner = style::query_first(&dom, "#inner").unwrap();
+        let outer = style::query_first(&dom, "#outer").unwrap();
+        let body = style::query_first(&dom, "body").unwrap();
+        assert_eq!(hit_test(&tree, 15.0, 15.0, &map), Some(inner));
+        assert_eq!(hit_test(&tree, 235.0, 90.0, &map).as_deref(), Some(&outer[..]));
+        assert_eq!(hit_test(&tree, 250.0, 120.0, &map).as_deref(), Some(&body[..]));
+    }
+
+    #[test]
+    fn hit_test_misses_empty_space() {
+        let dom = page();
+        let mut css_text = String::new();
+        style::collect_css(&dom, &mut css_text);
+        let sheet = css::parse(&css_text);
+        let styled = build(&dom, &sheet);
+        let tree = layout::layout_with(&styled, 800.0, &img::Store::new()).unwrap();
+        let mut map = HashMap::new();
+        addr_paths(&dom, &mut map, &mut Vec::new());
+        assert_eq!(hit_test(&tree, 700.0, 600.0, &map), None);
+    }
+
+    #[test]
+    fn box_center_targets_element_rect() {
+        let dom = page();
+        let mut css_text = String::new();
+        style::collect_css(&dom, &mut css_text);
+        let sheet = css::parse(&css_text);
+        let styled = build(&dom, &sheet);
+        let tree = layout::layout_with(&styled, 800.0, &img::Store::new()).unwrap();
+        let inner_path = style::query_first(&dom, "#inner").unwrap();
+        let node = node_at(&dom, &inner_path);
+        let (cx, cy) = box_center(&tree, node).unwrap();
+        let mut map = HashMap::new();
+        addr_paths(&dom, &mut map, &mut Vec::new());
+        assert_eq!(hit_test(&tree, cx, cy, &map), Some(inner_path));
+    }
+
+    #[test]
+    fn parse_point_reads_coords() {
+        assert_eq!(parse_point("120,80"), Some((120.0, 80.0)));
+        assert_eq!(parse_point("12.5 , 7"), Some((12.5, 7.0)));
+        assert_eq!(parse_point("#btn"), None);
+        assert_eq!(parse_point("12,"), None);
+    }
 }
