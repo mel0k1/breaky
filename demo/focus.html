@@ -1,18 +1,17 @@
-<html><head><style>
-#inp { width: 220px; height: 40px; background: #eee; }
-#log { width: 300px; height: 30px; }
-</style></head><body>
-<div id="inp">[input]</div>
-<div id="log">keys: -</div>
+<html><body>
+<button id="a" class="f">alpha</button>
+<button id="b" class="f" tabindex="2">beta</button>
+<button id="c" class="f">gamma</button>
+<div id="s">idle</div>
 <script>
-var log = document.getElementById('log');
-var keys = [];
-document.getElementById('inp').addEventListener('focus', function () {
-  log.textContent = 'focused';
+var s = document.getElementById('s');
+document.addEventListener('focusin', function (ev) {
+  var id = ev.target.getAttribute('id');
+  s.textContent = 'focused: ' + id;
+  ev.target.setAttribute('class', 'f2');
 });
-document.getElementById('inp').addEventListener('keydown', function (ev) {
-  keys.push(ev.key);
-  log.textContent = 'keys: ' + keys.join(' ');
+document.addEventListener('focusout', function (ev) {
+  ev.target.setAttribute('class', 'f');
 });
 </script>
 </body></html>

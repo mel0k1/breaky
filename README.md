@@ -36,7 +36,17 @@ the first to the second, dispatching `mouseout` on the old element and
 (`<selector|X,Y>` after the key) when given, else at
 `document.activeElement`, else at `body` — bubbling to `document`.
 `focus()`/`blur()` on elements dispatch non-bubbling `focus`/`blur` events
-and maintain `document.activeElement`, which defaults to `body`. The `resize`
+and maintain `document.activeElement`, which defaults to `body`; the
+bubbling `focusout`/`focusin` pair fires around them in the UI Events order
+(`blur` → `focusout` → `focus` → `focusin`) with `relatedTarget` pointing
+at the other end of the move, and both stay uncancelable. Focus and hover
+state follow elements through tree mutations: `__active` and `__hover` are
+remapped on insert/move and cleared when the node is removed. A `Tab`
+`keydown` (not prevented) moves focus along the tab order — positive
+`tabindex` values ascending first, then implicit focusables (`a`, `button`,
+`input`, `select`, `textarea`) and `tabindex="0"` in document order,
+wrapping at both ends; `Shift+Tab` walks it backwards and sets `ev.shiftKey`.
+The `resize`
 command sets the viewport (`document.innerWidth`/`innerHeight`) and dispatches
 a `resize` event on `document` before painting. Scripts in
 `<script>` tags (inline or `src`, local or remote) run in an embedded
@@ -150,6 +160,7 @@ Workspace of small crates:
 - [x] getBoundingClientRect() over the layout boxes
 - [x] `new Event()` constructor and `dispatchEvent()` from JS, mouseover/mouseout pairs with previous-target tracking (`breaky mouse <from> <to>`)
 - [x] focus()/blur() with non-bubbling focus/blur events, `document.activeElement`, keydown on the focused element
+- [x] bubbling focusin/focusout with `relatedTarget`, focus/hover remap across mutations, Tab/Shift+Tab navigation by `tabindex`
 - [x] `resize` command with `document.innerWidth`/`innerHeight` and a resize event on `document`
 
 ## License

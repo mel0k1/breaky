@@ -6,8 +6,8 @@ use html::{inner_html, parse, Node, NodeKind};
 use style::query_all;
 
 use super::{
-    breaky_free_value, breaky_is_exception, breaky_to_cstring, cstr, to_string,
-    JSContext, JSCFunction, JSValue, JSValueUnion, EVAL_GLOBAL,
+    breaky_free_value, breaky_is_exception, breaky_to_cstring, cstr, to_string, JSCFunction,
+    JSContext, JSValue, JSValueUnion, EVAL_GLOBAL,
 };
 use super::{
     JS_Call, JS_Eval, JS_FreeCString, JS_GetContextOpaque, JS_GetException, JS_GetGlobalObject,
@@ -336,10 +336,7 @@ fn slot_key(s: &Slot) -> String {
 fn same_container(a: &Slot, b: &Slot) -> bool {
     match (a, b) {
         (Slot::Tree(_), Slot::Tree(_)) => true,
-        (
-            Slot::Parked { slot: s1, .. },
-            Slot::Parked { slot: s2, .. },
-        ) => s1 == s2,
+        (Slot::Parked { slot: s1, .. }, Slot::Parked { slot: s2, .. }) => s1 == s2,
         _ => false,
     }
 }
@@ -950,9 +947,10 @@ unsafe extern "C" fn el_attr(
     let p = arg(ctx, argc, argv, 0);
     let name = arg(ctx, argc, argv, 1).to_lowercase();
     let found = with_any(st, &p, |node| match &node.kind {
-        NodeKind::Element { attrs, .. } => {
-            attrs.iter().find(|(k, _)| *k == name).map(|(_, v)| v.clone())
-        }
+        NodeKind::Element { attrs, .. } => attrs
+            .iter()
+            .find(|(k, _)| *k == name)
+            .map(|(_, v)| v.clone()),
         _ => None,
     })
     .flatten();
@@ -1176,7 +1174,10 @@ mod tests {
     #[test]
     fn inner_html_set() {
         let mut dom = tree();
-        eval_on(&mut dom, "document.getElementById('a').innerHTML = '<b>x</b>y'");
+        eval_on(
+            &mut dom,
+            "document.getElementById('a').innerHTML = '<b>x</b>y'",
+        );
         assert_eq!(
             eval_on(&mut dom, "document.getElementById('a').innerHTML"),
             "<b>x</b>y"
@@ -1194,7 +1195,10 @@ mod tests {
     #[test]
     fn inner_html_multi_root_fragment() {
         let mut dom = tree();
-        eval_on(&mut dom, "document.getElementById('a').innerHTML = 'a<br>b'");
+        eval_on(
+            &mut dom,
+            "document.getElementById('a').innerHTML = 'a<br>b'",
+        );
         let p = by_id(&dom, "a");
         assert_eq!(p.children.len(), 3);
         assert_eq!(p.children[1].name(), Some("br"));
@@ -1205,7 +1209,10 @@ mod tests {
         let mut dom = tree();
         assert_eq!(eval_on(&mut dom, "document.body.textContent"), "hiyo");
         let mut dom = tree();
-        eval_on(&mut dom, "document.getElementById('a').textContent = 'z & <w>'");
+        eval_on(
+            &mut dom,
+            "document.getElementById('a').textContent = 'z & <w>'",
+        );
         assert_eq!(
             eval_on(&mut dom, "document.getElementById('a').textContent"),
             "z & <w>"
@@ -1225,7 +1232,10 @@ mod tests {
             "document.getElementById('a').setAttribute('data-k', 'v')",
         );
         assert_eq!(
-            eval_on(&mut dom, "document.getElementById('a').getAttribute('data-k')"),
+            eval_on(
+                &mut dom,
+                "document.getElementById('a').getAttribute('data-k')"
+            ),
             "v"
         );
         match &by_id(&dom, "a").kind {
@@ -1262,7 +1272,10 @@ mod tests {
             style_attr(&dom, "a").as_deref(),
             Some("color: red; font-size: 12px")
         );
-        eval_on(&mut dom, "document.getElementById('a').style.color = 'blue'");
+        eval_on(
+            &mut dom,
+            "document.getElementById('a').style.color = 'blue'",
+        );
         assert_eq!(
             style_attr(&dom, "a").as_deref(),
             Some("color: blue; font-size: 12px")
@@ -1281,7 +1294,10 @@ mod tests {
     #[test]
     fn style_empty_value_clears_prop() {
         let mut dom = tree();
-        eval_on(&mut dom, "var s = document.getElementById('a').style; s.color = 'red'; s.color = ''");
+        eval_on(
+            &mut dom,
+            "var s = document.getElementById('a').style; s.color = 'red'; s.color = ''",
+        );
         assert_eq!(
             eval_on(&mut dom, "document.getElementById('a').style.color"),
             ""
@@ -1294,27 +1310,21 @@ mod tests {
         let mut dom = tree();
         assert_eq!(eval_on(&mut dom, "document.body.tagName"), "BODY");
         eval_on(&mut dom, "document.body.style.margin = '4px'");
-        assert_eq!(
-            eval_on(&mut dom, "document.body.style.margin"),
-            "4px"
-        );
+        assert_eq!(eval_on(&mut dom, "document.body.style.margin"), "4px");
         match &by_name(&dom, "body").kind {
             NodeKind::Element { attrs, .. } => {
                 assert!(attrs.contains(&("style".into(), "margin: 4px".into())));
             }
             _ => panic!(),
         }
-        assert_eq!(
-            by_id(&dom, "a"),
-            &{
-                let mut n = Node::new(NodeKind::Element {
-                    name: "p".into(),
-                    attrs: vec![("id".into(), "a".into())],
-                });
-                n.children.push(Node::new(NodeKind::Text("hi".into())));
-                n
-            }
-        );
+        assert_eq!(by_id(&dom, "a"), &{
+            let mut n = Node::new(NodeKind::Element {
+                name: "p".into(),
+                attrs: vec![("id".into(), "a".into())],
+            });
+            n.children.push(Node::new(NodeKind::Text("hi".into())));
+            n
+        });
     }
 
     #[test]
@@ -1325,7 +1335,10 @@ mod tests {
         rt.eval("var el = document.getElementById('a')").unwrap();
         rt.eval("el.textContent = 'persist'").unwrap();
         let p = by_id(&dom, "a");
-        assert_eq!(p.children, vec![Node::new(NodeKind::Text("persist".into()))]);
+        assert_eq!(
+            p.children,
+            vec![Node::new(NodeKind::Text("persist".into()))]
+        );
     }
 
     #[test]
@@ -1407,32 +1420,31 @@ mod tests {
             }
             _ => panic!(),
         }
+        assert_eq!(div.children[1].name(), Some("p"), "moved node must be last");
         assert_eq!(
-            div.children[1].name(),
-            Some("p"),
-            "moved node must be last"
-        );
-        assert_eq!(
-            rt.eval("document.querySelector('#a p').textContent").unwrap(),
+            rt.eval("document.querySelector('#a p').textContent")
+                .unwrap(),
             "2"
         );
     }
 
     #[test]
     fn append_rejects_cycles() {
-        let mut dom = parse(
-            "<html><body><div id=\"a\"><p id=\"x\">1</p></div></body></html>",
-        );
+        let mut dom = parse("<html><body><div id=\"a\"><p id=\"x\">1</p></div></body></html>");
         let mut rt = Runtime::new();
         rt.bind_dom(&mut dom);
         assert_eq!(
-            rt.eval("document.getElementById('a').appendChild(document.getElementById('a')) === null")
-                .unwrap(),
+            rt.eval(
+                "document.getElementById('a').appendChild(document.getElementById('a')) === null"
+            )
+            .unwrap(),
             "true"
         );
         assert_eq!(
-            rt.eval("document.getElementById('x').appendChild(document.getElementById('a')) === null")
-                .unwrap(),
+            rt.eval(
+                "document.getElementById('x').appendChild(document.getElementById('a')) === null"
+            )
+            .unwrap(),
             "true"
         );
         let div = by_id(&dom, "a");
@@ -1480,7 +1492,8 @@ mod tests {
         let mut rt = Runtime::new();
         rt.bind_dom(&mut dom);
         assert_eq!(
-            rt.eval("document.querySelector('.on').textContent").unwrap(),
+            rt.eval("document.querySelector('.on').textContent")
+                .unwrap(),
             "a"
         );
         assert_eq!(
@@ -1511,11 +1524,15 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            rt.eval("typeof document.getElementById('a').onclick").unwrap(),
+            rt.eval("typeof document.getElementById('a').onclick")
+                .unwrap(),
             "function"
         );
         let path = find_first(&dom, &|n| has_id(n, "a"), &mut Vec::new()).unwrap();
-        assert_eq!(rt.dispatch_event("click", &path, 0.0, 0.0, "").unwrap(), true);
+        assert_eq!(
+            rt.dispatch_event("click", &path, 0.0, 0.0, "").unwrap(),
+            true
+        );
         assert_eq!(
             by_id(&dom, "a").children,
             vec![Node::new(NodeKind::Text("clicked".into()))]
@@ -1528,7 +1545,10 @@ mod tests {
         let mut rt = Runtime::new();
         rt.bind_dom(&mut dom);
         let path = find_first(&dom, &|n| has_id(n, "a"), &mut Vec::new()).unwrap();
-        assert_eq!(rt.dispatch_event("click", &path, 0.0, 0.0, "").unwrap(), false);
+        assert_eq!(
+            rt.dispatch_event("click", &path, 0.0, 0.0, "").unwrap(),
+            false
+        );
     }
 
     #[test]
@@ -1541,11 +1561,15 @@ mod tests {
         rt.eval("document.getElementById('a').onclick = null")
             .unwrap();
         assert_eq!(
-            rt.eval("document.getElementById('a').onclick === null").unwrap(),
+            rt.eval("document.getElementById('a').onclick === null")
+                .unwrap(),
             "true"
         );
         let path = find_first(&dom, &|n| has_id(n, "a"), &mut Vec::new()).unwrap();
-        assert_eq!(rt.dispatch_event("click", &path, 0.0, 0.0, "").unwrap(), false);
+        assert_eq!(
+            rt.dispatch_event("click", &path, 0.0, 0.0, "").unwrap(),
+            false
+        );
     }
 
     #[test]
@@ -1556,7 +1580,10 @@ mod tests {
         rt.eval("document.getElementById('a').onclick = function () { null.foo }")
             .unwrap();
         let path = find_first(&dom, &|n| has_id(n, "a"), &mut Vec::new()).unwrap();
-        assert!(rt.dispatch_event("click", &path, 0.0, 0.0, "").unwrap_err().contains("TypeError"));
+        assert!(rt
+            .dispatch_event("click", &path, 0.0, 0.0, "")
+            .unwrap_err()
+            .contains("TypeError"));
     }
 
     #[test]
@@ -1581,10 +1608,8 @@ mod tests {
         let mut dom = tree();
         let mut rt = Runtime::new();
         rt.bind_dom(&mut dom);
-        rt.eval(
-            "document.body.insertBefore(document.createElement('hr'), null) !== null",
-        )
-        .unwrap();
+        rt.eval("document.body.insertBefore(document.createElement('hr'), null) !== null")
+            .unwrap();
         let body = by_name(&dom, "body");
         assert_eq!(body.children.len(), 3);
         assert_eq!(body.children[2].name(), Some("hr"));
@@ -1611,10 +1636,8 @@ mod tests {
         let mut rt = Runtime::new();
         rt.bind_dom(&mut dom);
         assert_eq!(
-            rt.eval(
-                "var a = document.getElementById('a'); document.body.removeChild(a) === a"
-            )
-            .unwrap(),
+            rt.eval("var a = document.getElementById('a'); document.body.removeChild(a) === a")
+                .unwrap(),
             "true"
         );
         assert_eq!(by_name(&dom, "body").children.len(), 1);
@@ -1642,10 +1665,8 @@ mod tests {
         let mut rt = Runtime::new();
         rt.bind_dom(&mut dom);
         assert_eq!(
-            rt.eval(
-                "document.body.removeChild(document.createElement('i')) === null"
-            )
-            .unwrap(),
+            rt.eval("document.body.removeChild(document.createElement('i')) === null")
+                .unwrap(),
             "true"
         );
         assert_eq!(by_name(&dom, "body").children.len(), 2);
@@ -1657,10 +1678,8 @@ mod tests {
         let mut rt = Runtime::new();
         rt.bind_dom(&mut dom);
         rt.eval("var b = document.getElementById('b')").unwrap();
-        rt.eval(
-            "document.body.insertBefore(document.createElement('div'), b)",
-        )
-        .unwrap();
+        rt.eval("document.body.insertBefore(document.createElement('div'), b)")
+            .unwrap();
         rt.eval("b.textContent = 'still b'").unwrap();
         let body = by_name(&dom, "body");
         assert_eq!(body.children[1].name(), Some("div"));
@@ -1701,7 +1720,10 @@ mod tests {
         rt.eval("document.body.insertBefore(document.createElement('div'), b)")
             .unwrap();
         let new_path = find_first(&dom, &|n| has_id(n, "b"), &mut Vec::new()).unwrap();
-        assert_eq!(rt.dispatch_event("click", &new_path, 0.0, 0.0, "").unwrap(), true);
+        assert_eq!(
+            rt.dispatch_event("click", &new_path, 0.0, 0.0, "").unwrap(),
+            true
+        );
         assert_eq!(
             by_id(&dom, "b").children,
             vec![Node::new(NodeKind::Text("hit".into()))]
@@ -1710,24 +1732,16 @@ mod tests {
 
     #[test]
     fn insert_before_moves_within_parent() {
-        let mut dom = parse(
-            "<html><body><p id=\"a\">1</p><p id=\"b\">2</p><p id=\"c\">3</p></body></html>",
-        );
+        let mut dom =
+            parse("<html><body><p id=\"a\">1</p><p id=\"b\">2</p><p id=\"c\">3</p></body></html>");
         let mut rt = Runtime::new();
         rt.bind_dom(&mut dom);
         rt.eval("document.body.insertBefore(document.getElementById('c'), document.getElementById('a'))")
             .unwrap();
         let body = by_name(&dom, "body");
-        let ids: Vec<bool> = body
-            .children
-            .iter()
-            .map(|n| has_id(n, "c"))
-            .collect();
+        let ids: Vec<bool> = body.children.iter().map(|n| has_id(n, "c")).collect();
         assert_eq!(ids, vec![true, false, false]);
-        assert_eq!(
-            rt.eval("document.body.textContent").unwrap(),
-            "312"
-        );
+        assert_eq!(rt.eval("document.body.textContent").unwrap(), "312");
     }
 
     #[test]
@@ -1738,7 +1752,8 @@ mod tests {
         let mut rt = Runtime::new();
         rt.bind_dom(&mut dom);
         rt.eval("var x = document.getElementById('x')").unwrap();
-        rt.eval("document.getElementById('end').appendChild(x)").unwrap();
+        rt.eval("document.getElementById('end').appendChild(x)")
+            .unwrap();
         rt.eval("x.textContent = 'moved'").unwrap();
         let end = by_id(&dom, "end");
         assert_eq!(
@@ -1792,7 +1807,10 @@ mod tests {
         rt.eval("document.body.addEventListener('click', L('body'))")
             .unwrap();
         let path = find_first(&dom, &|n| has_id(n, "a"), &mut Vec::new()).unwrap();
-        assert_eq!(rt.dispatch_event("click", &path, 0.0, 0.0, "").unwrap(), true);
+        assert_eq!(
+            rt.dispatch_event("click", &path, 0.0, 0.0, "").unwrap(),
+            true
+        );
         assert_eq!(log_of(&mut rt), "p:P:P|body:BODY:P");
     }
 
@@ -1824,7 +1842,10 @@ mod tests {
         rt.eval("document.body.addEventListener('click', L('body'))")
             .unwrap();
         let path = find_first(&dom, &|n| has_id(n, "a"), &mut Vec::new()).unwrap();
-        assert_eq!(rt.dispatch_event("click", &path, 0.0, 0.0, "").unwrap(), true);
+        assert_eq!(
+            rt.dispatch_event("click", &path, 0.0, 0.0, "").unwrap(),
+            true
+        );
         assert_eq!(log_of(&mut rt), "p");
     }
 
@@ -1838,7 +1859,10 @@ mod tests {
         )
         .unwrap();
         let path = find_first(&dom, &|n| has_id(n, "a"), &mut Vec::new()).unwrap();
-        assert_eq!(rt.dispatch_event("click", &path, 0.0, 0.0, "").unwrap(), false);
+        assert_eq!(
+            rt.dispatch_event("click", &path, 0.0, 0.0, "").unwrap(),
+            false
+        );
         assert_eq!(rt.eval("globalThis.__n === undefined").unwrap(), "true");
     }
 
@@ -1878,8 +1902,10 @@ mod tests {
         rt.eval(log_target()).unwrap();
         rt.eval("document.getElementById('a').addEventListener('click', L('lst'))")
             .unwrap();
-        rt.eval("document.getElementById('a').onclick = function () { globalThis.__log.push('onc') }")
-            .unwrap();
+        rt.eval(
+            "document.getElementById('a').onclick = function () { globalThis.__log.push('onc') }",
+        )
+        .unwrap();
         let path = find_first(&dom, &|n| has_id(n, "a"), &mut Vec::new()).unwrap();
         rt.dispatch_event("click", &path, 0.0, 0.0, "").unwrap();
         assert_eq!(log_of(&mut rt), "lst:P:P|onc");
@@ -1937,7 +1963,10 @@ mod tests {
             false
         );
         assert_eq!(rt.eval("globalThis.__n === undefined").unwrap(), "true");
-        assert_eq!(rt.dispatch_event("click", &path, 0.0, 0.0, "").unwrap(), true);
+        assert_eq!(
+            rt.dispatch_event("click", &path, 0.0, 0.0, "").unwrap(),
+            true
+        );
     }
 
     #[test]
@@ -1945,10 +1974,8 @@ mod tests {
         let mut dom = tree();
         let mut rt = Runtime::new();
         rt.bind_dom(&mut dom);
-        rt.eval(
-            "document.getElementById('a').addEventListener('click', function () { null.foo })",
-        )
-        .unwrap();
+        rt.eval("document.getElementById('a').addEventListener('click', function () { null.foo })")
+            .unwrap();
         let path = find_first(&dom, &|n| has_id(n, "a"), &mut Vec::new()).unwrap();
         assert!(rt
             .dispatch_event("click", &path, 0.0, 0.0, "")
@@ -1976,11 +2003,13 @@ mod tests {
             "0"
         );
         assert_eq!(
-            rt.eval("document.querySelectorAll('.on, li').length").unwrap(),
+            rt.eval("document.querySelectorAll('.on, li').length")
+                .unwrap(),
             "3"
         );
         assert_eq!(
-            rt.eval("document.querySelectorAll('ul li.on').length").unwrap(),
+            rt.eval("document.querySelectorAll('ul li.on').length")
+                .unwrap(),
             "2"
         );
     }
@@ -2018,7 +2047,8 @@ mod tests {
             "true"
         );
         assert_eq!(
-            rt.eval("document.querySelectorAll('ul li').length").unwrap(),
+            rt.eval("document.querySelectorAll('ul li').length")
+                .unwrap(),
             "3"
         );
     }
@@ -2074,9 +2104,7 @@ mod tests {
 
     #[test]
     fn clone_node_shallow_and_deep() {
-        let mut dom = parse(
-            "<html><body><div id=\"a\"><b>x</b><i>y</i></div></body></html>",
-        );
+        let mut dom = parse("<html><body><div id=\"a\"><b>x</b><i>y</i></div></body></html>");
         let mut rt = Runtime::new();
         rt.bind_dom(&mut dom);
         rt.eval(
@@ -2157,7 +2185,8 @@ mod tests {
             .unwrap();
         let path = find_first(&dom, &|n| has_id(n, "a"), &mut Vec::new()).unwrap();
         assert_eq!(
-            rt.dispatch_event("keydown", &path, 0.0, 0.0, "Enter").unwrap(),
+            rt.dispatch_event("keydown", &path, 0.0, 0.0, "Enter")
+                .unwrap(),
             true
         );
         assert_eq!(
@@ -2181,7 +2210,10 @@ mod tests {
             rt.dispatch_event("keydown", &path, 0.0, 0.0, "a").unwrap(),
             true
         );
-        assert_eq!(rt.eval("globalThis.__log.join('|')").unwrap(), "body:a|doc:a");
+        assert_eq!(
+            rt.eval("globalThis.__log.join('|')").unwrap(),
+            "body:a|doc:a"
+        );
     }
 
     #[test]
@@ -2192,13 +2224,11 @@ mod tests {
         rt.eval("document.addEventListener('keydown', function (ev) { globalThis.__k = [ev.key, ev.target === document] })")
             .unwrap();
         assert_eq!(
-            rt.dispatch_event("keydown", &[], 0.0, 0.0, "Escape").unwrap(),
+            rt.dispatch_event("keydown", &[], 0.0, 0.0, "Escape")
+                .unwrap(),
             true
         );
-        assert_eq!(
-            rt.eval("globalThis.__k.join('|')").unwrap(),
-            "Escape|true"
-        );
+        assert_eq!(rt.eval("globalThis.__k.join('|')").unwrap(), "Escape|true");
     }
 
     #[test]
@@ -2213,17 +2243,16 @@ mod tests {
             .unwrap();
         let path = find_first(&dom, &|n| has_id(n, "a"), &mut Vec::new()).unwrap();
         assert_eq!(
-            rt.dispatch_event("mouseover", &path, 40.5, 9.0, "").unwrap(),
+            rt.dispatch_event("mouseover", &path, 40.5, 9.0, "")
+                .unwrap(),
             true
         );
         assert_eq!(log_of(&mut rt), "a:P:P|body:BODY:P");
         rt.eval("document.getElementById('a').addEventListener('mouseover', function (ev) { globalThis.__c = [ev.clientX, ev.clientY, ev.target.tagName] })")
             .unwrap();
-        rt.dispatch_event("mouseover", &path, 40.5, 9.0, "").unwrap();
-        assert_eq!(
-            rt.eval("globalThis.__c.join('|')").unwrap(),
-            "40.5|9|P"
-        );
+        rt.dispatch_event("mouseover", &path, 40.5, 9.0, "")
+            .unwrap();
+        assert_eq!(rt.eval("globalThis.__c.join('|')").unwrap(), "40.5|9|P");
     }
 
     #[test]
@@ -2356,10 +2385,8 @@ mod tests {
             "document.body.addEventListener('ping', function () { globalThis.__log.push('body') })",
         )
         .unwrap();
-        rt.eval(
-            "document.addEventListener('ping', function () { globalThis.__log.push('doc') })",
-        )
-        .unwrap();
+        rt.eval("document.addEventListener('ping', function () { globalThis.__log.push('doc') })")
+            .unwrap();
         assert_eq!(
             rt.eval("document.getElementById('a').dispatchEvent(new Event('ping'))")
                 .unwrap(),
@@ -2367,8 +2394,10 @@ mod tests {
         );
         assert_eq!(rt.eval("globalThis.__log.join('|')").unwrap(), "");
         assert_eq!(
-            rt.eval("document.getElementById('a').dispatchEvent(new Event('ping', { bubbles: true }))")
-                .unwrap(),
+            rt.eval(
+                "document.getElementById('a').dispatchEvent(new Event('ping', { bubbles: true }))"
+            )
+            .unwrap(),
             "true"
         );
         assert_eq!(rt.eval("globalThis.__log.join('|')").unwrap(), "body|doc");
@@ -2382,7 +2411,8 @@ mod tests {
         rt.eval("globalThis.__log = []; document.addEventListener('boom', function (ev) { globalThis.__log.push('doc:' + (ev.target === document)) })")
             .unwrap();
         assert_eq!(
-            rt.eval("document.dispatchEvent(new Event('boom'))").unwrap(),
+            rt.eval("document.dispatchEvent(new Event('boom'))")
+                .unwrap(),
             "true"
         );
         assert_eq!(rt.eval("globalThis.__log.join('|')").unwrap(), "doc:true");
@@ -2486,7 +2516,8 @@ mod tests {
         let pb = find_first(&dom, &|n| has_id(n, "b"), &mut Vec::new()).unwrap();
         rt.focus(&pb).unwrap();
         assert_eq!(
-            rt.eval("document.activeElement.getAttribute('id')").unwrap(),
+            rt.eval("document.activeElement.getAttribute('id')")
+                .unwrap(),
             "b"
         );
         assert_eq!(rt.eval("b.blur()").unwrap(), "true");
@@ -2504,7 +2535,8 @@ mod tests {
         let pb = rt.active_path().unwrap();
         let expected = find_first(&dom, &|n| has_id(n, "b"), &mut Vec::new()).unwrap();
         assert_eq!(pb, expected);
-        rt.dispatch_event("keydown", &pb, 0.0, 0.0, "Enter").unwrap();
+        rt.dispatch_event("keydown", &pb, 0.0, 0.0, "Enter")
+            .unwrap();
         assert_eq!(rt.eval("globalThis.__k").unwrap(), "Enter");
     }
 
@@ -2519,18 +2551,221 @@ mod tests {
     }
 
     #[test]
+    fn focusin_focusout_bubble_in_spec_order() {
+        let mut dom = tree();
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        rt.eval("globalThis.__seen = []; var rid = function (ev) { return ev.relatedTarget ? ev.relatedTarget.getAttribute('id') : 'null' }; document.addEventListener('focusout', function (ev) { globalThis.__seen.push('out:' + ev.target.getAttribute('id') + '>' + rid(ev)) }); document.addEventListener('focusin', function (ev) { globalThis.__seen.push('in:' + ev.target.getAttribute('id') + '>' + rid(ev)) })")
+            .unwrap();
+        let pa = find_first(&dom, &|n| has_id(n, "a"), &mut Vec::new()).unwrap();
+        let pb = find_first(&dom, &|n| has_id(n, "b"), &mut Vec::new()).unwrap();
+        rt.focus(&pa).unwrap();
+        assert_eq!(rt.eval("globalThis.__seen.join('|')").unwrap(), "in:a>null");
+        rt.focus(&pb).unwrap();
+        assert_eq!(
+            rt.eval("globalThis.__seen.join('|')").unwrap(),
+            "in:a>null|out:a>b|in:b>a"
+        );
+    }
+
+    #[test]
+    fn focusin_focusout_are_not_cancelable() {
+        let mut dom = tree();
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        rt.eval("var caps = ''; document.addEventListener('focusin', function (ev) { caps += 'in' + ev.bubbles + ':' + ev.cancelable + ';' }); document.addEventListener('focusout', function (ev) { caps += 'out' + ev.bubbles + ':' + ev.cancelable + ';' })")
+            .unwrap();
+        let pa = find_first(&dom, &|n| has_id(n, "a"), &mut Vec::new()).unwrap();
+        let pb = find_first(&dom, &|n| has_id(n, "b"), &mut Vec::new()).unwrap();
+        rt.focus(&pa).unwrap();
+        rt.focus(&pb).unwrap();
+        assert_eq!(
+            rt.eval("caps").unwrap(),
+            "intrue:false;outtrue:false;intrue:false;"
+        );
+    }
+
+    #[test]
+    fn blur_fires_focusout_that_bubbles() {
+        let mut dom = tree();
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        rt.eval("var b = document.getElementById('b'); b.focus(); var parts = []; document.addEventListener('focusout', function (ev) { parts.push('doc:' + ev.target.getAttribute('id') + ':' + ev.relatedTarget) }); document.body.addEventListener('focusout', function (ev) { parts.push('body:' + ev.currentTarget.tagName) })")
+            .unwrap();
+        assert_eq!(rt.eval("b.blur()").unwrap(), "true");
+        assert_eq!(rt.eval("parts.join('|')").unwrap(), "body:BODY|doc:b:null");
+        assert_eq!(rt.eval("document.activeElement.tagName").unwrap(), "BODY");
+    }
+
+    #[test]
+    fn remap_keeps_active_element_on_sibling_insert() {
+        let mut dom = tree();
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        rt.eval("var b = document.getElementById('b'); b.focus(); var s = document.createElement('p'); s.setAttribute('id', 's'); document.body.insertBefore(s, b)")
+            .unwrap();
+        assert_eq!(
+            rt.eval("document.activeElement.getAttribute('id')")
+                .unwrap(),
+            "b"
+        );
+        let expected = find_first(&dom, &|n| has_id(n, "b"), &mut Vec::new()).unwrap();
+        assert_eq!(rt.active_path().unwrap(), expected);
+    }
+
+    #[test]
+    fn remap_follows_active_element_through_move() {
+        let mut dom = tree();
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        rt.eval("var a = document.getElementById('a'); var w = document.createElement('div'); w.setAttribute('id', 'w'); document.body.insertBefore(w, a); w.appendChild(a); a.focus()")
+            .unwrap();
+        let before = rt.active_path().unwrap();
+        rt.eval("document.body.appendChild(w)").unwrap();
+        assert_eq!(
+            rt.eval("document.activeElement.getAttribute('id')")
+                .unwrap(),
+            "a"
+        );
+        let after = find_first(&dom, &|n| has_id(n, "a"), &mut Vec::new()).unwrap();
+        assert_eq!(rt.active_path().unwrap(), after);
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn remap_clears_active_and_hover_on_remove() {
+        let mut dom = tree();
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        let pa = find_first(&dom, &|n| has_id(n, "a"), &mut Vec::new()).unwrap();
+        rt.dispatch_move(&pa, 1.0, 1.0).unwrap();
+        rt.eval("document.getElementById('a').focus()").unwrap();
+        assert!(rt.active_path().is_some());
+        rt.eval("document.body.removeChild(document.getElementById('a'))")
+            .unwrap();
+        assert_eq!(rt.active_path(), None);
+        assert_eq!(rt.eval("document.activeElement.tagName").unwrap(), "BODY");
+        assert_eq!(rt.dispatch_move(&[], 1.0, 1.0).unwrap(), false);
+    }
+
+    #[test]
+    fn remap_shifts_hover_on_sibling_insert() {
+        let mut dom = tree();
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        rt.eval(log_target()).unwrap();
+        let pb = find_first(&dom, &|n| has_id(n, "b"), &mut Vec::new()).unwrap();
+        rt.dispatch_move(&pb, 1.0, 1.0).unwrap();
+        rt.eval("var b = document.getElementById('b'); b.addEventListener('mouseout', L('out-b')); var s = document.createElement('p'); s.setAttribute('id', 's'); document.body.insertBefore(s, b)")
+            .unwrap();
+        let pa = find_first(&dom, &|n| has_id(n, "a"), &mut Vec::new()).unwrap();
+        rt.dispatch_move(&pa, 1.0, 1.0).unwrap();
+        assert_eq!(log_of(&mut rt), "out-b:P:P");
+    }
+
+    #[test]
+    fn tab_moves_focus_in_tabindex_order() {
+        let mut dom = parse("<html><body><input id=\"i\"><span id=\"s\" tabindex=\"1\">x</span><button id=\"b\">go</button><a id=\"h\">link</a><p id=\"n\" tabindex=\"2\">p</p><span id=\"m\" tabindex=\"-1\">m</span></body></html>");
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        for id in ["s", "n", "i", "b", "h", "s"] {
+            let p = rt.active_path().unwrap_or_else(|| vec![0, 0]);
+            rt.dispatch_event("keydown", &p, 0.0, 0.0, "Tab").unwrap();
+            assert_eq!(
+                rt.eval("document.activeElement.getAttribute('id')")
+                    .unwrap(),
+                id
+            );
+        }
+        let p = rt.active_path().unwrap();
+        rt.dispatch_event("keydown", &p, 0.0, 0.0, "Shift+Tab")
+            .unwrap();
+        assert_eq!(
+            rt.eval("document.activeElement.getAttribute('id')")
+                .unwrap(),
+            "h"
+        );
+    }
+
+    #[test]
+    fn tab_skips_negative_tabindex_element() {
+        let mut dom = parse("<html><body><input id=\"i\"><span id=\"s\" tabindex=\"1\">x</span><button id=\"b\">go</button><a id=\"h\">link</a><p id=\"n\" tabindex=\"2\">p</p><span id=\"m\" tabindex=\"-1\">m</span></body></html>");
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        rt.eval("document.getElementById('m').focus()").unwrap();
+        assert_eq!(
+            rt.eval("document.activeElement.getAttribute('id')")
+                .unwrap(),
+            "m"
+        );
+        let p = rt.active_path().unwrap();
+        rt.dispatch_event("keydown", &p, 0.0, 0.0, "Shift+Tab")
+            .unwrap();
+        assert_eq!(
+            rt.eval("document.activeElement.getAttribute('id')")
+                .unwrap(),
+            "h"
+        );
+        let p = rt.active_path().unwrap();
+        rt.dispatch_event("keydown", &p, 0.0, 0.0, "Tab").unwrap();
+        assert_eq!(
+            rt.eval("document.activeElement.getAttribute('id')")
+                .unwrap(),
+            "s"
+        );
+    }
+
+    #[test]
+    fn tab_respects_prevent_default() {
+        let mut dom =
+            parse("<html><body><input id=\"i\"><button id=\"b\">go</button></body></html>");
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        rt.eval("document.addEventListener('keydown', function (ev) { if (ev.key === 'Tab') ev.preventDefault() })")
+            .unwrap();
+        rt.dispatch_event("keydown", &[0, 0], 0.0, 0.0, "Tab")
+            .unwrap();
+        assert_eq!(rt.eval("document.activeElement.tagName").unwrap(), "BODY");
+        rt.eval("document.getElementById('i').focus()").unwrap();
+        let p = rt.active_path().unwrap();
+        rt.dispatch_event("keydown", &p, 0.0, 0.0, "Tab").unwrap();
+        assert_eq!(
+            rt.eval("document.activeElement.getAttribute('id')")
+                .unwrap(),
+            "i"
+        );
+    }
+
+    #[test]
+    fn shift_prefix_sets_shift_key_flag() {
+        let mut dom = tree();
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        rt.eval("var s = ''; document.addEventListener('keydown', function (ev) { s = ev.key + ':' + ev.shiftKey })")
+            .unwrap();
+        rt.dispatch_event("keydown", &[0, 0], 0.0, 0.0, "Shift+Tab")
+            .unwrap();
+        assert_eq!(rt.eval("s").unwrap(), "Tab:true");
+        rt.dispatch_event("keydown", &[0, 0], 0.0, 0.0, "Enter")
+            .unwrap();
+        assert_eq!(rt.eval("s").unwrap(), "Enter:false");
+    }
+
+    #[test]
     fn inner_width_and_height_track_viewport() {
         let mut dom = tree();
         let mut rt = Runtime::new();
         rt.bind_dom(&mut dom);
         rt.set_viewport(400.0, 300.0);
         assert_eq!(
-            rt.eval("document.innerWidth + 'x' + document.innerHeight").unwrap(),
+            rt.eval("document.innerWidth + 'x' + document.innerHeight")
+                .unwrap(),
             "400x300"
         );
         rt.set_viewport(640.0, 480.0);
         assert_eq!(
-            rt.eval("document.innerWidth + 'x' + document.innerHeight").unwrap(),
+            rt.eval("document.innerWidth + 'x' + document.innerHeight")
+                .unwrap(),
             "640x480"
         );
     }

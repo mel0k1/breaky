@@ -18,10 +18,32 @@ function shiftKey(q, par, ix, up) {
   var nk = up ? k + 1 : k - 1;
   return par + "." + nk + (dot === -1 ? "" : rel.slice(dot));
 }
+function takePath(p, from, parkKey, par, ix, fly) {
+  if (p === null || p === undefined) return p;
+  if (inside(p, from)) {
+    if (parkKey !== undefined) return null;
+    fly.push(p.slice(from.length));
+    return null;
+  }
+  return shiftKey(p, par, ix, false);
+}
+function putPath(p, at, pix, fly) {
+  if (p === null || p === undefined) {
+    if (fly.length > 0) {
+      var s = fly.pop();
+      fly.length = 0;
+      return at + "." + pix + s;
+    }
+    return p;
+  }
+  return shiftKey(p, at, pix, true);
+}
 function remap(ops) {
   var flyW = [];
   var flyC = [];
   var flyL = [];
+  var flyA = [];
+  var flyH = [];
   for (var oi = 0; oi < ops.length; oi++) {
     var op = ops[oi];
     if (op.take !== undefined) {
@@ -46,6 +68,8 @@ function remap(ops) {
       }
       globalThis.__clicks = retake(globalThis.__clicks, from, op.park, par, ix, flyC);
       globalThis.__listeners = retake(globalThis.__listeners, from, op.park, par, ix, flyL);
+      globalThis.__active = takePath(globalThis.__active, from, op.park, par, ix, flyA);
+      globalThis.__hover = takePath(globalThis.__hover, from, op.park, par, ix, flyH);
     } else if (op.put !== undefined) {
       var at = op.put.at;
       var pix = op.put.index;
@@ -62,6 +86,8 @@ function remap(ops) {
       }
       globalThis.__clicks = reput(globalThis.__clicks, at, pix, flyC);
       globalThis.__listeners = reput(globalThis.__listeners, at, pix, flyL);
+      globalThis.__active = putPath(globalThis.__active, at, pix, flyA);
+      globalThis.__hover = putPath(globalThis.__hover, at, pix, flyH);
     }
   }
 }
@@ -181,9 +207,14 @@ globalThis.__fire = function (type, targetPath, xs, ys, key) {
   var ev = new Event(type, { bubbles: true, cancelable: true });
   ev.clientX = parseFloat(xs);
   ev.clientY = parseFloat(ys);
-  ev.key = key === undefined ? "" : String(key);
+  var k = key === undefined ? "" : String(key);
+  ev.shiftKey = k.indexOf("Shift+") === 0;
+  if (ev.shiftKey) k = k.slice(6);
+  ev.key = k;
   ev.button = 0;
-  return dispatch(ev, targetPath);
+  var fired = dispatch(ev, targetPath);
+  if (type === "keydown" && k === "Tab" && !ev.defaultPrevented) __tab(ev.shiftKey);
+  return fired;
 };
 globalThis.__move = function (path, xs, ys) {
   var prev = globalThis.__hover === undefined ? null : globalThis.__hover;
@@ -210,16 +241,92 @@ globalThis.__move = function (path, xs, ys) {
   globalThis.__hover = next;
   return true;
 };
-globalThis.__focus = function (path) {
+function setFocus(path) {
   if (globalThis.__active === path) return false;
   var prev = globalThis.__active;
   globalThis.__active = path;
-  if (prev !== null) dispatch(new Event("blur"), prev);
-  dispatch(new Event("focus"), path);
+  if (prev !== null) {
+    dispatch(new Event("blur"), prev);
+    var out = new Event("focusout", { bubbles: true });
+    out.relatedTarget = path === null ? null : el(path);
+    dispatch(out, prev);
+  }
+  if (path !== null) {
+    dispatch(new Event("focus"), path);
+    var inn = new Event("focusin", { bubbles: true });
+    inn.relatedTarget = prev === null ? null : el(prev);
+    dispatch(inn, path);
+  }
   return true;
+}
+globalThis.__focus = function (path) {
+  return setFocus(path === "" ? null : path);
 };
 globalThis.__active_path = function () {
-  return globalThis.__active === null ? "" : globalThis.__active;
+  return globalThis.__active === null || globalThis.__active === undefined ? "" : globalThis.__active;
+};
+function pathCmp(a, b) {
+  var as = a.split(".");
+  var bs = b.split(".");
+  for (var i = 0; i < as.length && i < bs.length; i++) {
+    var d = +as[i] - +bs[i];
+    if (d !== 0) return d;
+  }
+  return as.length - bs.length;
+}
+var TAB_TAGS = { A: 1, BUTTON: 1, INPUT: 1, SELECT: 1, TEXTAREA: 1 };
+function tabbables() {
+  var all = globalThis.document.querySelectorAll("*");
+  var pos = [];
+  var zero = [];
+  for (var i = 0; i < all.length; i++) {
+    var w = all[i];
+    var t = w.getAttribute("tabindex");
+    if (t !== null && t !== undefined) {
+      var n = parseInt(t, 10);
+      if (isNaN(n) || n < 0) continue;
+      if (n === 0) {
+        zero.push(w);
+        continue;
+      }
+      var j = 0;
+      while (j < pos.length && parseInt(pos[j].getAttribute("tabindex"), 10) <= n) j++;
+      pos.splice(j, 0, w);
+    } else if (TAB_TAGS[w.tagName]) {
+      zero.push(w);
+    }
+  }
+  return pos.concat(zero);
+}
+globalThis.__tab = function (shift) {
+  var list = tabbables();
+  if (list.length === 0) return false;
+  var cur = globalThis.__active;
+  var ix = -1;
+  for (var i = 0; i < list.length; i++) {
+    if (list[i].__path === cur) {
+      ix = i;
+      break;
+    }
+  }
+  var n;
+  if (ix !== -1) {
+    n = shift ? (ix - 1 + list.length) % list.length : (ix + 1) % list.length;
+  } else if (cur === null || cur === undefined) {
+    n = shift ? list.length - 1 : 0;
+  } else {
+    var best = -1;
+    for (var j = 0; j < list.length; j++) {
+      var d = pathCmp(list[j].__path, cur);
+      if (shift ? d < 0 : d > 0) {
+        best = j;
+        if (!shift) break;
+      }
+    }
+    n = best === -1 ? (shift ? list.length - 1 : 0) : best;
+  }
+  setFocus(list[n].__path);
+  return true;
 };
 function el(p) {
   var w = {
@@ -316,9 +423,7 @@ function el(p) {
     },
     blur: function() {
       if (globalThis.__active !== this.__path) return false;
-      globalThis.__active = null;
-      dispatch(new Event("blur"), this.__path);
-      return true;
+      return setFocus(null);
     },
     get onclick() {
       return globalThis.__clicks[this.__path] || null;
