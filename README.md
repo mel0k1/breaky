@@ -14,6 +14,8 @@ cargo run -- page.html base.css target.css width out.png [seconds]
 cargo run -- fetch http://example.com [width] [out.png]
 cargo run -- fetch https://example.com [width] [out.png]
 cargo run -- anim <gif-or-image> [prefix]
+cargo run -- animate <page> [style.css] [width] [prefix]
+cargo run -- animate <url> [width] [prefix]
 ```
 
 Prints the DOM tree, the styled tree with cascaded properties and the box
@@ -22,7 +24,11 @@ flag renders with every text run selected, applying `::selection` styles.
 With two stylesheets it renders the interpolated state between them at the
 given time in seconds, honoring `transition` on either side. The `anim`
 command dumps every frame of an image (local path or URL) as numbered PNGs
-and prints each frame delay in milliseconds.
+and prints each frame delay in milliseconds. The `animate` command renders a
+whole page on a timer, stepping every animated GIF at its frame delay, for a
+local file or a remote URL. Scripts in `<script>` tags (inline or `src`,
+local or remote) run in an embedded QuickJS engine and print through
+`console.log`.
 
 ## Architecture
 
@@ -33,7 +39,8 @@ Workspace of small crates:
 - `breaky-style` — selector matching and cascade
 - `breaky-layout` — box tree and block/inline layout
 - `breaky-render` — PNG painter (hand-written encoder, zero deps)
-- `breaky-font` — embedded bitmap font and glyph metrics
+- `breaky-font` — TTF font engine with per-family registries
+- `breaky-js` — embedded QuickJS interpreter (vendored C, FFI bindings)
 - `breaky-img` — PNG, JPEG and GIF decoders with GIF animation frames (hand-written inflate, IDCT, LZW, zero deps)
 - `breaky-net` — HTTP client and URL resolution
 - `breaky-tls` — TLS 1.3 client with X.509 chain validation to the system trust store (hand-rolled, zero deps)
@@ -97,6 +104,10 @@ Workspace of small crates:
 - [x] Certificate chain validation to system roots (X.509, RSA PKCS#1/PSS, ECDSA P-256/P-384, PEM store)
 - [x] Certificate chain cache for repeat fetches (images, stylesheets)
 - [x] GIF animation (frames, delays, disposal methods)
+- [x] Animated GIFs on remote pages (fetch, animate over timer)
+- [x] Flex gap (shorthand cascade, wrap-aware)
+- [x] @font-face with deferred web fonts, per family metrics
+- [x] QuickJS scripting (`<script>` inline and src, console.log)
 
 ## License
 

@@ -5,6 +5,7 @@ use std::process::exit;
 
 use css::Value;
 use html::{Node, NodeKind};
+use breaky_js as js;
 use net::Url;
 use style::{build, build_selected, StyledNode};
 
@@ -60,6 +61,9 @@ fn main() {
         let base_html = Path::new(path).parent().unwrap_or(Path::new("."));
         load_local_images(&srcs, base_html, &mut imgs, &mut anims);
         load_faces(&sheet, &styled, base_css, None);
+        let mut scripts: Vec<Script> = Vec::new();
+        gather_scripts(&dom, &mut scripts);
+        run_scripts(&scripts, base_html, None);
         if let Some(tree) = layout::layout_with(&styled, viewport, &imgs) {
             println!();
             layout::print_tree(&tree, 0);
@@ -141,6 +145,9 @@ fn fetch(args: &[String]) {
     }
     load_remote_images(&mut client, &urls, &base, &mut imgs, &mut anims);
     load_faces(&sheet, &styled, Path::new("."), Some((&mut client, &base)));
+    let mut scripts: Vec<Script> = Vec::new();
+    gather_scripts(&dom, &mut scripts);
+    run_scripts(&scripts, Path::new("."), Some((&mut client, &base)));
     if let Some(tree) = layout::layout_with(&styled, viewport, &imgs) {
         println!();
         layout::print_tree(&tree, 0);
@@ -235,6 +242,9 @@ fn animate_cmd(args: &[String]) {
             load_remote_images(&mut client, &urls, &b, &mut imgs, &mut anims);
             load_remote_images(&mut client, &srcs, &b, &mut imgs, &mut anims);
             load_faces(&sheet, &styled, Path::new("."), Some((&mut client, &b)));
+            let mut scripts: Vec<Script> = Vec::new();
+            gather_scripts(&dom, &mut scripts);
+            run_scripts(&scripts, Path::new("."), Some((&mut client, &b)));
         }
         None => {
             let base_css = args
@@ -250,6 +260,9 @@ fn animate_cmd(args: &[String]) {
             let base_html = Path::new(src).parent().unwrap_or(Path::new("."));
             load_local_images(&srcs, base_html, &mut imgs, &mut anims);
             load_faces(&sheet, &styled, base_css.unwrap_or(Path::new(".")), None);
+            let mut scripts: Vec<Script> = Vec::new();
+            gather_scripts(&dom, &mut scripts);
+            run_scripts(&scripts, base_html, None);
         }
     }
     let tree = match layout::layout_with(&styled, viewport, &imgs) {
@@ -277,6 +290,87 @@ fn animate_cmd(args: &[String]) {
         let target = start + std::time::Duration::from_millis(now as u64);
         if let Some(w) = target.checked_duration_since(std::time::Instant::now()) {
             std::thread::sleep(w);
+        }
+    }
+}
+
+struct Script {
+    src: Option<String>,
+    text: String,
+}
+
+fn gather_scripts(node: &Node, out: &mut Vec<Script>) {
+    if let NodeKind::Element { name, attrs } = &node.kind {
+        if name == "script" {
+            let mut text = String::new();
+            collect_text(node, &mut text);
+            let src = attrs
+                .iter()
+                .find(|(k, _)| k == "src")
+                .map(|(_, v)| v.clone());
+            if src.is_some() || !text.trim().is_empty() {
+                out.push(Script { src, text });
+            }
+            return;
+        }
+    }
+    for c in &node.children {
+        gather_scripts(c, out);
+    }
+}
+
+fn collect_text(node: &Node, out: &mut String) {
+    if let NodeKind::Text(s) = &node.kind {
+        out.push_str(s);
+    }
+    for c in &node.children {
+        collect_text(c, out);
+    }
+}
+
+fn run_scripts(
+    scripts: &[Script],
+    base: &Path,
+    remote: Option<(&mut net::Client, &Url)>,
+) {
+    if scripts.is_empty() {
+        return;
+    }
+    let (mut client, url_base) = match remote {
+        Some((c, b)) => (Some(c), Some(b)),
+        None => (None, None),
+    };
+    let mut rt = js::Runtime::new();
+    for s in scripts {
+        let code = match (&s.src, url_base) {
+            (Some(u), Some(b)) => match net::resolve(b, u) {
+                Ok(full) => match client.as_deref_mut().unwrap().get_url(&full) {
+                    Ok(r) if r.status == 200 => String::from_utf8_lossy(&r.body).into_owned(),
+                    Ok(r) => {
+                        eprintln!("{}: HTTP {}", u, r.status);
+                        continue;
+                    }
+                    Err(e) => {
+                        eprintln!("{}: {}", u, e);
+                        continue;
+                    }
+                },
+                Err(e) => {
+                    eprintln!("{}: {}", u, e);
+                    continue;
+                }
+            },
+            (Some(u), None) => match fs::read(base.join(u)) {
+                Ok(b) => String::from_utf8_lossy(&b).into_owned(),
+                Err(e) => {
+                    eprintln!("{}: {}", u, e);
+                    continue;
+                }
+            },
+            (None, _) => s.text.clone(),
+        };
+        if let Err(e) = rt.eval(&code) {
+            eprintln!("{}", e);
         }
     }
 }
