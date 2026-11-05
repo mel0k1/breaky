@@ -6,7 +6,7 @@ use std::process::exit;
 use css::Value;
 use html::{Node, NodeKind};
 use net::Url;
-use style::{StyledNode, build, build_selected};
+use style::{build, build_selected, StyledNode};
 
 fn main() {
     load_font();
@@ -122,7 +122,8 @@ fn fetch(args: &[String]) {
         eprintln!("{}", e);
         exit(1);
     });
-    let resp = net::get(url).unwrap_or_else(|e| {
+    let mut client = net::Client::new();
+    let resp = client.get(url).unwrap_or_else(|e| {
         eprintln!("{}", e);
         exit(1);
     });
@@ -134,7 +135,7 @@ fn fetch(args: &[String]) {
     let dom = html::parse(&src);
     html::print_tree(&dom, 0);
     let mut css_text = String::new();
-    collect_links(&dom, &base, &mut css_text);
+    collect_links(&mut client, &dom, &base, &mut css_text);
     style::collect_css(&dom, &mut css_text);
     let sheet = css::parse(&css_text);
     let styled = build(&dom, &sheet);
@@ -150,7 +151,7 @@ fn fetch(args: &[String]) {
             urls.push(s);
         }
     }
-    load_remote_images(&urls, &base, &mut imgs);
+    load_remote_images(&mut client, &urls, &base, &mut imgs);
     if let Some(tree) = layout::layout_with(&styled, viewport, &imgs) {
         println!();
         layout::print_tree(&tree, 0);
@@ -213,7 +214,12 @@ fn animate_cmd(args: &[String]) {
         .get(3)
         .filter(|p| !p.is_empty())
         .map(|p| Path::new(p).parent().unwrap_or(Path::new(".")));
-    load_local_images(&urls, base_css.unwrap_or(Path::new(".")), &mut imgs, &mut anims);
+    load_local_images(
+        &urls,
+        base_css.unwrap_or(Path::new(".")),
+        &mut imgs,
+        &mut anims,
+    );
     let mut srcs: Vec<String> = Vec::new();
     gather_dom_images(&dom, &mut srcs);
     let base_html = Path::new(src).parent().unwrap_or(Path::new("."));
@@ -337,10 +343,15 @@ fn load_local_images(
     }
 }
 
-fn load_remote_images(urls: &[String], base: &Url, store: &mut img::Store) {
+fn load_remote_images(
+    client: &mut net::Client,
+    urls: &[String],
+    base: &Url,
+    store: &mut img::Store,
+) {
     for u in urls {
         match net::resolve(base, u) {
-            Ok(full) => match net::get_url(&full, 0) {
+            Ok(full) => match client.get_url(&full) {
                 Ok(resp) if resp.status == 200 => match img::decode(&resp.body) {
                     Some(im) => store.insert(u.clone(), im),
                     None => eprintln!("{}: unsupported image", u),
@@ -353,18 +364,21 @@ fn load_remote_images(urls: &[String], base: &Url, store: &mut img::Store) {
     }
 }
 
-fn collect_links(node: &Node, base: &Url, out: &mut String) {
+fn collect_links(client: &mut net::Client, node: &Node, base: &Url, out: &mut String) {
     if let NodeKind::Element { name, attrs } = &node.kind {
         if name == "link" {
             let rel = attrs.iter().find(|(k, _)| k == "rel").map(|(_, v)| v);
             let href = attrs.iter().find(|(k, _)| k == "href").map(|(_, v)| v);
             let is_sheet = rel
-                .map(|r| r.split_whitespace().any(|p| p.eq_ignore_ascii_case("stylesheet")))
+                .map(|r| {
+                    r.split_whitespace()
+                        .any(|p| p.eq_ignore_ascii_case("stylesheet"))
+                })
                 .unwrap_or(false);
             if is_sheet {
                 if let Some(h) = href {
                     match net::resolve(base, h) {
-                        Ok(u) => match net::get_url(&u, 0) {
+                        Ok(u) => match client.get_url(&u) {
                             Ok(resp) if resp.status == 200 => {
                                 out.push_str(&String::from_utf8_lossy(&resp.body));
                                 out.push('\n');
@@ -379,7 +393,7 @@ fn collect_links(node: &Node, base: &Url, out: &mut String) {
         }
     }
     for c in &node.children {
-        collect_links(c, base, out);
+        collect_links(client, c, base, out);
     }
 }
 
