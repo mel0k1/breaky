@@ -36,7 +36,9 @@ the first to the second, dispatching `mouseout` on the old element and
 (`<selector|X,Y>` after the key) when given, else at
 `document.activeElement`, else at `body` — bubbling to `document`.
 `focus()`/`blur()` on elements dispatch non-bubbling `focus`/`blur` events
-and maintain `document.activeElement`, which defaults to `body`. Scripts in
+and maintain `document.activeElement`, which defaults to `body`. The `resize`
+command sets the viewport (`document.innerWidth`/`innerHeight`) and dispatches
+a `resize` event on `document` before painting. Scripts in
 `<script>` tags (inline or `src`, local or remote) run in an embedded
 QuickJS engine and print through `console.log`. Scripts get live DOM
 bindings — `document.getElementById`, `document.body`,
@@ -148,6 +150,7 @@ Workspace of small crates:
 - [x] getBoundingClientRect() over the layout boxes
 - [x] `new Event()` constructor and `dispatchEvent()` from JS, mouseover/mouseout pairs with previous-target tracking (`breaky mouse <from> <to>`)
 - [x] focus()/blur() with non-bubbling focus/blur events, `document.activeElement`, keydown on the focused element
+- [x] `resize` command with `document.innerWidth`/`innerHeight` and a resize event on `document`
 
 ## License
 

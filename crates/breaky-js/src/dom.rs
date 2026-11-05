@@ -24,6 +24,7 @@ pub(super) struct DomState {
     root: *mut Node,
     parking: Vec<Option<Node>>,
     rects: HashMap<String, (f32, f32, f32, f32)>,
+    viewport: (f32, f32),
 }
 
 const FUNCTIONS: &[(&str, JSCFunction)] = &[
@@ -33,6 +34,7 @@ const FUNCTIONS: &[(&str, JSCFunction)] = &[
     ("__doc_create_text", doc_create_text),
     ("__doc_query", doc_query),
     ("__doc_query_all", doc_query_all),
+    ("__doc_viewport", doc_viewport),
     ("__el_tag", el_tag),
     ("__el_attr", el_attr),
     ("__el_set_attr", el_set_attr),
@@ -58,6 +60,7 @@ pub(super) fn install(rt: &mut super::Runtime, root: &mut Node) {
         root: root as *mut Node,
         parking: Vec::new(),
         rects: HashMap::new(),
+        viewport: (0.0, 0.0),
     }));
     rt.dom = st;
     unsafe {
@@ -102,6 +105,11 @@ pub(super) fn set_rects(
     for (p, (x, y, r, b)) in rects {
         st.rects.insert(encode_path(p), (*x, *y, *r, *b));
     }
+}
+
+pub(super) fn set_viewport(rt: &mut super::Runtime, w: f32, h: f32) {
+    let st = unsafe { &mut *rt.dom };
+    st.viewport = (w, h);
 }
 
 pub(super) fn dispatch_event(
@@ -233,6 +241,17 @@ fn decode_dotted(s: &str) -> Option<Vec<usize>> {
         return None;
     }
     s.split('.').map(|p| p.parse::<usize>().ok()).collect()
+}
+
+unsafe extern "C" fn doc_viewport(
+    ctx: *mut JSContext,
+    _this: JSValue,
+    _argc: c_int,
+    _argv: *const JSValue,
+) -> JSValue {
+    let st = unsafe { opaque(ctx) };
+    let (w, h) = st.viewport;
+    js_string(ctx, &format!("[{},{}]", w, h))
 }
 
 unsafe fn opaque(ctx: *mut JSContext) -> &'static mut DomState {
@@ -2497,5 +2516,37 @@ mod tests {
         assert_eq!(rt.active_path(), None);
         rt.eval("document.getElementById('a').focus()").unwrap();
         assert!(rt.active_path().is_some());
+    }
+
+    #[test]
+    fn inner_width_and_height_track_viewport() {
+        let mut dom = tree();
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        rt.set_viewport(400.0, 300.0);
+        assert_eq!(
+            rt.eval("document.innerWidth + 'x' + document.innerHeight").unwrap(),
+            "400x300"
+        );
+        rt.set_viewport(640.0, 480.0);
+        assert_eq!(
+            rt.eval("document.innerWidth + 'x' + document.innerHeight").unwrap(),
+            "640x480"
+        );
+    }
+
+    #[test]
+    fn resize_event_reaches_document_listener() {
+        let mut dom = tree();
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        rt.set_viewport(400.0, 300.0);
+        rt.eval("globalThis.__seen = ''; document.addEventListener('resize', function () { globalThis.__seen = document.innerWidth + 'x' + document.innerHeight })")
+            .unwrap();
+        assert_eq!(
+            rt.dispatch_event("resize", &[], 0.0, 0.0, "").unwrap(),
+            true
+        );
+        assert_eq!(rt.eval("globalThis.__seen").unwrap(), "400x300");
     }
 }

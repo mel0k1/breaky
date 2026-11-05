@@ -398,6 +398,12 @@ globalThis.document = {
     var p = globalThis.__active;
     return p === null || p === undefined ? globalThis.document.body : el(p);
   },
+  get innerWidth() {
+    return JSON.parse(__doc_viewport())[0];
+  },
+  get innerHeight() {
+    return JSON.parse(__doc_viewport())[1];
+  },
   get body() {
     var p = __doc_body();
     return p === null ? null : el(p);

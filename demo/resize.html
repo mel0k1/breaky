@@ -1,0 +1,11 @@
+<html><head><style>
+#box { width: 300px; height: 60px; background: #4060a0; color: white; }
+</style></head><body>
+<div id="box">width: ?</div>
+<script>
+var box = document.getElementById('box');
+document.addEventListener('resize', function () {
+  box.textContent = 'width: ' + document.innerWidth;
+});
+</script>
+</body></html>

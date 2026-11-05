@@ -134,6 +134,10 @@ impl Runtime {
         dom::active_path(self)
     }
 
+    pub fn set_viewport(&mut self, w: f32, h: f32) {
+        dom::set_viewport(self, w, h);
+    }
+
     pub fn set_rects(&mut self, rects: &HashMap<Vec<usize>, (f32, f32, f32, f32)>) {
         dom::set_rects(self, rects);
     }

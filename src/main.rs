@@ -38,6 +38,10 @@ fn main() {
         event_cmd(&args, "keydown");
         return;
     }
+    if path == "resize" {
+        resize_cmd(&args);
+        return;
+    }
     if args.len() >= 6 {
         transition_page(&args);
         return;
@@ -276,6 +280,114 @@ fn event_cmd(args: &[String], typ: &str) {
     }
     if let Some(tree) = layout::layout_with(&styled, viewport, &imgs) {
         let canvas = render::paint_with(&tree, viewport, &imgs);
+        fs::write(out, canvas.to_png()).unwrap_or_else(fail);
+        println!("saved {}", out);
+    }
+}
+
+fn resize_cmd(args: &[String]) {
+    let src = args.get(2).unwrap_or_else(|| usage());
+    let remote = src.contains("://");
+    let wi = if remote { 3 } else { 4 };
+    let width = args
+        .get(wi)
+        .and_then(|s| s.parse::<f32>().ok())
+        .unwrap_or(800.0);
+    let height = args
+        .get(wi + 1)
+        .and_then(|s| s.parse::<f32>().ok())
+        .unwrap_or(width);
+    let oi = if args
+        .get(wi + 1)
+        .and_then(|s| s.parse::<f32>().ok())
+        .is_some()
+    {
+        wi + 2
+    } else {
+        wi + 1
+    };
+    let out = args.get(oi).map(|s| s.as_str()).unwrap_or("resize.png");
+    let mut client = net::Client::new();
+    let (mut dom, css_text, base) = if remote {
+        let (b, d, c) = remote_page(&mut client, src);
+        (d, c, Some(b))
+    } else {
+        let html_text = fs::read_to_string(src).unwrap_or_else(fail);
+        let dom = html::parse(&html_text);
+        let mut css_text = args
+            .get(3)
+            .map(|p| fs::read_to_string(p).unwrap_or_else(fail))
+            .unwrap_or_default();
+        style::collect_css(&dom, &mut css_text);
+        (dom, css_text, None)
+    };
+    let sheet = css::parse(&css_text);
+    let mut scripts: Vec<Script> = Vec::new();
+    gather_scripts(&dom, &mut scripts);
+    let base_html = Path::new(src).parent().unwrap_or(Path::new("."));
+    let mut rt = match &base {
+        Some(b) => run_scripts(&scripts, &mut dom, Path::new("."), Some((&mut client, b))),
+        None => run_scripts(&scripts, &mut dom, base_html, None),
+    };
+    let mut styled = build(&dom, &sheet);
+    let mut imgs = img::Store::new();
+    let mut anims = img::AnimStore::new();
+    let mut urls: Vec<String> = Vec::new();
+    gather_images(&styled, &mut urls);
+    let mut srcs: Vec<String> = Vec::new();
+    gather_dom_images(&dom, &mut srcs);
+    match &base {
+        Some(b) => {
+            load_remote_images(&mut client, &urls, b, &mut imgs, &mut anims);
+            load_remote_images(&mut client, &srcs, b, &mut imgs, &mut anims);
+            load_faces(&sheet, &styled, Path::new("."), Some((&mut client, b)));
+        }
+        None => {
+            let css_base = args
+                .get(3)
+                .map(|p| Path::new(p).parent().unwrap_or(Path::new(".")))
+                .unwrap_or(Path::new("."));
+            load_local_images(&urls, css_base, &mut imgs, &mut anims);
+            load_local_images(&srcs, base_html, &mut imgs, &mut anims);
+            load_faces(&sheet, &styled, css_base, None);
+        }
+    }
+    if let Some(tree) = layout::layout_with(&styled, width, &imgs) {
+        let mut map = HashMap::new();
+        addr_paths(&dom, &mut map, &mut Vec::new());
+        let mut rects: HashMap<Vec<usize>, (f32, f32, f32, f32)> = HashMap::new();
+        collect_rects(&tree, &map, &mut rects);
+        rt.set_rects(&rects);
+    }
+    rt.set_viewport(width, height);
+    match rt.dispatch_event("resize", &[], 0.0, 0.0, "") {
+        Ok(true) => {}
+        Ok(false) => eprintln!("no resize handler"),
+        Err(e) => eprintln!("{}", e),
+    }
+    styled = build(&dom, &sheet);
+    urls.clear();
+    gather_images(&styled, &mut urls);
+    srcs.clear();
+    gather_dom_images(&dom, &mut srcs);
+    match &base {
+        Some(b) => {
+            load_remote_images(&mut client, &urls, b, &mut imgs, &mut anims);
+            load_remote_images(&mut client, &srcs, b, &mut imgs, &mut anims);
+            load_faces(&sheet, &styled, Path::new("."), Some((&mut client, b)));
+        }
+        None => {
+            let css_base = args
+                .get(3)
+                .map(|p| Path::new(p).parent().unwrap_or(Path::new(".")))
+                .unwrap_or(Path::new("."));
+            load_local_images(&urls, css_base, &mut imgs, &mut anims);
+            load_local_images(&srcs, base_html, &mut imgs, &mut anims);
+            load_faces(&sheet, &styled, css_base, None);
+        }
+    }
+    if let Some(tree) = layout::layout_with(&styled, width, &imgs) {
+        let canvas = render::paint_with(&tree, width, &imgs);
         fs::write(out, canvas.to_png()).unwrap_or_else(fail);
         println!("saved {}", out);
     }
@@ -971,6 +1083,8 @@ fn usage() -> ! {
     eprintln!("       breaky mouse <url> <selector|X,Y> [width] [out.png]");
     eprintln!("       breaky mouse <url> <from> <to> [width] [out.png]");
     eprintln!("       breaky key <file> [style.css] <key> [<selector|X,Y>] [width] [out.png]");
+    eprintln!("       breaky resize <file> [style.css] <width> [height] [out.png]");
+    eprintln!("       breaky resize <url> <width> [height] [out.png]");
     exit(2);
 }
 
