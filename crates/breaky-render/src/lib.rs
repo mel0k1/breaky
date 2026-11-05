@@ -69,13 +69,13 @@ impl Canvas {
         }
     }
 
-    pub fn text(&mut self, x: f32, y: f32, s: &str, c: Color, size: f32) {
-        self.text_alpha(x, y, s, c, size, 1.0);
+    pub fn text(&mut self, family: &str, x: f32, y: f32, s: &str, c: Color, size: f32) {
+        self.text_alpha(family, x, y, s, c, size, 1.0);
     }
 
-    pub fn text_alpha(&mut self, x: f32, y: f32, s: &str, c: Color, size: f32, a: f32) {
+    pub fn text_alpha(&mut self, family: &str, x: f32, y: f32, s: &str, c: Color, size: f32, a: f32) {
         let sa = a * c.a as f32 / 255.0;
-        let offs = font::offsets(s, size);
+        let offs = font::offsets_in(family, s, size);
         let mut i = 0;
         for ch in s.chars() {
             let ox = offs[i];
@@ -83,7 +83,7 @@ impl Canvas {
             if matches!(ch, '\n' | '\r') {
                 continue;
             }
-            let bmp = font::rasterize(ch, size);
+            let bmp = font::rasterize_in(family, ch, size);
             if bmp.width == 0 {
                 continue;
             }
@@ -743,7 +743,15 @@ fn text_shadows_of(
     out
 }
 
-fn paint_text_shadow(canvas: &mut Canvas, x: f32, y: f32, s: &str, size: f32, sh: &Shadow) {
+fn paint_text_shadow(
+    canvas: &mut Canvas,
+    family: &str,
+    x: f32,
+    y: f32,
+    s: &str,
+    size: f32,
+    sh: &Shadow,
+) {
     let n = if sh.blur > 0.0 {
         ((sh.blur * sh.blur).ceil() as usize).clamp(2, 24)
     } else {
@@ -758,6 +766,7 @@ fn paint_text_shadow(canvas: &mut Canvas, x: f32, y: f32, s: &str, size: f32, sh
             (r * th.cos(), r * th.sin())
         };
         canvas.text_alpha(
+            family,
             x + sh.dx + jx,
             y + sh.dy + jy,
             s,
@@ -950,14 +959,16 @@ fn paint_text(canvas: &mut Canvas, b: &LayoutBox) {
         canvas.fill(b.dims.content, bg);
     }
     let (size, lh) = text_metrics(map);
-    let baseline =
-        b.dims.content.y + (lh - (font::asc(size) + font::desc(size))) / 2.0 + font::asc(size);
+    let fam = b.family();
+    let baseline = b.dims.content.y
+        + (lh - (font::asc_in(&fam, size) + font::desc_in(&fam, size))) / 2.0
+        + font::asc_in(&fam, size);
     if let Some(m) = map {
         for s in text_shadows_of(m, color).iter().rev() {
-            paint_text_shadow(canvas, b.dims.content.x, baseline, t, size, s);
+            paint_text_shadow(canvas, &fam, b.dims.content.x, baseline, t, size, s);
         }
     }
-    canvas.text(b.dims.content.x, baseline, t, color, size);
+    canvas.text(&fam, b.dims.content.x, baseline, t, color, size);
 }
 
 fn paint_marker(canvas: &mut Canvas, b: &LayoutBox, s: &Scene) {
@@ -974,8 +985,10 @@ fn paint_marker(canvas: &mut Canvas, b: &LayoutBox, s: &Scene) {
             a: 255,
         });
     let (size, lh) = text_metrics(map);
-    let baseline =
-        b.dims.content.y + (lh - (font::asc(size) + font::desc(size))) / 2.0 + font::asc(size);
+    let fam = b.family();
+    let baseline = b.dims.content.y
+        + (lh - (font::asc_in(&fam, size) + font::desc_in(&fam, size))) / 2.0
+        + font::asc_in(&fam, size);
     if let Some(u) = b.marker_img {
         if let Some(im) = s.frame(u) {
             canvas.image(
@@ -1004,7 +1017,14 @@ fn paint_marker(canvas: &mut Canvas, b: &LayoutBox, s: &Scene) {
         return;
     }
     let m = b.marker.unwrap();
-    canvas.text(b.dims.content.x - font::width(m, size), baseline, m, color, size);
+    canvas.text(
+        &fam,
+        b.dims.content.x - font::width_in(&fam, m, size),
+        baseline,
+        m,
+        color,
+        size,
+    );
 }
 
 fn text_metrics(map: Option<&std::collections::HashMap<String, Vec<Value>>>) -> (f32, f32) {

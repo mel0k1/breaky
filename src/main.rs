@@ -59,6 +59,7 @@ fn main() {
         gather_dom_images(&dom, &mut srcs);
         let base_html = Path::new(path).parent().unwrap_or(Path::new("."));
         load_local_images(&srcs, base_html, &mut imgs, &mut anims);
+        load_faces(&sheet, &styled, base_css, None);
         if let Some(tree) = layout::layout_with(&styled, viewport, &imgs) {
             println!();
             layout::print_tree(&tree, 0);
@@ -102,6 +103,8 @@ fn transition_page(args: &[String]) {
     gather_dom_images(&dom, &mut srcs);
     let base_html = Path::new(&args[1]).parent().unwrap_or(Path::new("."));
     load_local_images(&srcs, base_html, &mut imgs, &mut anims);
+    load_faces(&sheet_from, &merged, base_css, None);
+    load_faces(&sheet_to, &merged, base_css, None);
     if let Some(tree) = layout::layout_with(&merged, viewport, &imgs) {
         println!();
         layout::print_tree(&tree, 0);
@@ -137,6 +140,7 @@ fn fetch(args: &[String]) {
         }
     }
     load_remote_images(&mut client, &urls, &base, &mut imgs, &mut anims);
+    load_faces(&sheet, &styled, Path::new("."), Some((&mut client, &base)));
     if let Some(tree) = layout::layout_with(&styled, viewport, &imgs) {
         println!();
         layout::print_tree(&tree, 0);
@@ -230,6 +234,7 @@ fn animate_cmd(args: &[String]) {
         Some(b) => {
             load_remote_images(&mut client, &urls, &b, &mut imgs, &mut anims);
             load_remote_images(&mut client, &srcs, &b, &mut imgs, &mut anims);
+            load_faces(&sheet, &styled, Path::new("."), Some((&mut client, &b)));
         }
         None => {
             let base_css = args
@@ -244,6 +249,7 @@ fn animate_cmd(args: &[String]) {
             );
             let base_html = Path::new(src).parent().unwrap_or(Path::new("."));
             load_local_images(&srcs, base_html, &mut imgs, &mut anims);
+            load_faces(&sheet, &styled, base_css.unwrap_or(Path::new(".")), None);
         }
     }
     let tree = match layout::layout_with(&styled, viewport, &imgs) {
@@ -272,6 +278,54 @@ fn animate_cmd(args: &[String]) {
         if let Some(w) = target.checked_duration_since(std::time::Instant::now()) {
             std::thread::sleep(w);
         }
+    }
+}
+
+fn load_faces(
+    sheet: &css::Stylesheet,
+    styled: &StyledNode,
+    base: &Path,
+    remote: Option<(&mut net::Client, &Url)>,
+) {
+    let mut used: Vec<String> = Vec::new();
+    collect_families(styled, &mut used);
+    let (mut client, url_base) = match remote {
+        Some((c, b)) => (Some(c), Some(b)),
+        None => (None, None),
+    };
+    for f in &sheet.faces {
+        if !used.iter().any(|u| u == &f.family) {
+            continue;
+        }
+        let bytes = match url_base {
+            Some(b) => match net::resolve(b, &f.src) {
+                Ok(u) => match client.as_deref_mut().unwrap().get_url(&u) {
+                    Ok(r) if r.status == 200 => Ok(r.body),
+                    Ok(r) => Err(format!("HTTP {}", r.status)),
+                    Err(e) => Err(e),
+                },
+                Err(e) => Err(e),
+            },
+            None => fs::read(base.join(&f.src)).map_err(|e| e.to_string()),
+        };
+        match bytes {
+            Ok(b) => {
+                if !font::register(&f.family, &b) {
+                    eprintln!("{}: unsupported font", f.src);
+                }
+            }
+            Err(e) => eprintln!("{}: {}", f.src, e),
+        }
+    }
+}
+
+fn collect_families(node: &StyledNode, out: &mut Vec<String>) {
+    let f = style::family(&node.computed);
+    if !f.is_empty() && !out.iter().any(|x| x == &f) {
+        out.push(f);
+    }
+    for c in &node.children {
+        collect_families(c, out);
     }
 }
 

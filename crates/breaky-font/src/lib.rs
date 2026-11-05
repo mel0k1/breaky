@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 pub struct Bitmap {
     pub left: i32,
@@ -461,6 +461,7 @@ fn parse_kern(data: &[u8], base: usize, kern: &mut HashMap<u32, i16>) {
 }
 
 static FONT: OnceLock<Font> = OnceLock::new();
+static FONTS: OnceLock<Mutex<HashMap<String, &'static Font>>> = OnceLock::new();
 
 pub fn set(data: &[u8]) -> bool {
     match Font::parse(data) {
@@ -469,44 +470,72 @@ pub fn set(data: &[u8]) -> bool {
     }
 }
 
+pub fn register(family: &str, data: &[u8]) -> bool {
+    let f = match Font::parse(data) {
+        Some(f) => f,
+        None => return false,
+    };
+    let f: &'static Font = Box::leak(Box::new(f));
+    FONTS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap()
+        .insert(family.to_lowercase(), f);
+    true
+}
+
 fn font() -> &'static Font {
     FONT.get_or_init(builtin)
+}
+
+fn of(family: &str) -> &'static Font {
+    if !family.is_empty() {
+        if let Some(f) = FONTS
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap()
+            .get(&family.to_lowercase())
+        {
+            return f;
+        }
+    }
+    font()
 }
 
 fn kernable(c: char) -> bool {
     !matches!(c, '\t' | '\n' | '\r')
 }
 
-pub fn scale(size: f32) -> f32 {
-    size / font().upem
+pub fn scale_in(family: &str, size: f32) -> f32 {
+    size / of(family).upem
 }
 
-pub fn asc(size: f32) -> f32 {
-    font().ascent * scale(size)
+pub fn asc_in(family: &str, size: f32) -> f32 {
+    of(family).ascent * scale_in(family, size)
 }
 
-pub fn desc(size: f32) -> f32 {
-    font().descent * scale(size)
+pub fn desc_in(family: &str, size: f32) -> f32 {
+    of(family).descent * scale_in(family, size)
 }
 
-pub fn x_height(size: f32) -> f32 {
-    font().xh * scale(size)
+pub fn x_height_in(family: &str, size: f32) -> f32 {
+    of(family).xh * scale_in(family, size)
 }
 
-pub fn advance(c: char, size: f32) -> f32 {
+pub fn advance_in(family: &str, c: char, size: f32) -> f32 {
     match c {
         '\n' | '\r' => 0.0,
-        '\t' => 4.0 * advance(' ', size),
+        '\t' => 4.0 * advance_in(family, ' ', size),
         _ => {
-            let f = font();
-            f.advances[f.gid(c) as usize] as f32 * scale(size)
+            let f = of(family);
+            f.advances[f.gid(c) as usize] as f32 * scale_in(family, size)
         }
     }
 }
 
-pub fn width(text: &str, size: f32) -> f32 {
-    let f = font();
-    let sc = scale(size);
+pub fn width_in(family: &str, text: &str, size: f32) -> f32 {
+    let f = of(family);
+    let sc = scale_in(family, size);
     let mut w = 0.0;
     let mut prev: Option<char> = None;
     for c in text.chars() {
@@ -515,30 +544,62 @@ pub fn width(text: &str, size: f32) -> f32 {
                 w += f.kern_of(p, c) as f32 * sc;
             }
         }
-        w += advance(c, size);
+        w += advance_in(family, c, size);
         prev = Some(c);
     }
     w
 }
 
-pub fn offsets(text: &str, size: f32) -> Vec<f32> {
+pub fn offsets_in(family: &str, text: &str, size: f32) -> Vec<f32> {
     let chars: Vec<char> = text.chars().collect();
     let mut v = Vec::with_capacity(chars.len());
     let mut pen = 0.0;
     for (i, &c) in chars.iter().enumerate() {
         v.push(pen);
-        pen += advance(c, size);
+        pen += advance_in(family, c, size);
         if let Some(&n) = chars.get(i + 1) {
             if kernable(c) && kernable(n) {
-                pen += font().kern_of(c, n) as f32 * scale(size);
+                pen += of(family).kern_of(c, n) as f32 * scale_in(family, size);
             }
         }
     }
     v
 }
 
+pub fn rasterize_in(family: &str, c: char, size: f32) -> Bitmap {
+    raster(of(family), c, size)
+}
+
+pub fn scale(size: f32) -> f32 {
+    scale_in("", size)
+}
+
+pub fn asc(size: f32) -> f32 {
+    asc_in("", size)
+}
+
+pub fn desc(size: f32) -> f32 {
+    desc_in("", size)
+}
+
+pub fn x_height(size: f32) -> f32 {
+    x_height_in("", size)
+}
+
+pub fn advance(c: char, size: f32) -> f32 {
+    advance_in("", c, size)
+}
+
+pub fn width(text: &str, size: f32) -> f32 {
+    width_in("", text, size)
+}
+
+pub fn offsets(text: &str, size: f32) -> Vec<f32> {
+    offsets_in("", text, size)
+}
+
 pub fn rasterize(c: char, size: f32) -> Bitmap {
-    raster(font(), c, size)
+    rasterize_in("", c, size)
 }
 
 fn raster(f: &Font, c: char, size: f32) -> Bitmap {
@@ -1164,6 +1225,19 @@ mod tests {
         let sc = 100.0 / f.upem;
         let plain = (f.advances[1] + f.advances[2]) as f32 * sc;
         assert!((raster_width(&f, "AV", 100.0) - (plain - 100.0 * sc)).abs() < 1e-3);
+    }
+
+    #[test]
+    fn register_resolves_family_and_falls_back() {
+        let data = sample_font();
+        assert!(register("testface", &data));
+        assert!(width_in("TESTFACE", "AV", 100.0) > 0.0);
+        assert_eq!(
+            width_in("TESTFACE", "AV", 100.0),
+            width_in("testface", "AV", 100.0)
+        );
+        assert!(!register("broken", &[0, 1, 2, 3]));
+        assert_eq!(width_in("broken", "AV", 100.0), width_in("", "AV", 100.0));
     }
 
     fn raster_width(f: &Font, t: &str, size: f32) -> f32 {

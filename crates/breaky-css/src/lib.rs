@@ -172,9 +172,16 @@ pub struct Rule {
     pub declarations: Vec<Declaration>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct FontFace {
+    pub family: String,
+    pub src: String,
+}
+
 #[derive(Debug, PartialEq)]
 pub struct Stylesheet {
     pub rules: Vec<Rule>,
+    pub faces: Vec<FontFace>,
 }
 
 impl Selector {
@@ -198,6 +205,7 @@ impl Selector {
 pub fn parse(src: &str) -> Stylesheet {
     let chars: Vec<char> = src.chars().collect();
     let mut rules = Vec::new();
+    let mut faces = Vec::new();
     let mut i = 0;
     while i < chars.len() {
         skip_ws_comments(&chars, &mut i);
@@ -205,7 +213,15 @@ pub fn parse(src: &str) -> Stylesheet {
             break;
         }
         if chars[i] == '@' {
-            i = skip_at(&chars, i);
+            let (f, next) = font_face(&chars, i);
+            if next > i {
+                if let Some(f) = f {
+                    faces.push(f);
+                }
+                i = next;
+            } else {
+                i = skip_at(&chars, i);
+            }
             continue;
         }
         let (r, next) = rule(&chars, i);
@@ -214,7 +230,74 @@ pub fn parse(src: &str) -> Stylesheet {
         }
         i = next;
     }
-    Stylesheet { rules }
+    Stylesheet { rules, faces }
+}
+
+fn font_face(chars: &[char], start: usize) -> (Option<FontFace>, usize) {
+    let mut i = start + 1;
+    if ident(chars, &mut i) != "font-face" {
+        return (None, start);
+    }
+    skip_ws_comments(chars, &mut i);
+    if i >= chars.len() || chars[i] != '{' {
+        return (None, i);
+    }
+    i += 1;
+    let mut family = String::new();
+    let mut src = String::new();
+    loop {
+        skip_ws_comments(chars, &mut i);
+        if i >= chars.len() {
+            break;
+        }
+        match chars[i] {
+            '}' => {
+                i += 1;
+                break;
+            }
+            ';' => i += 1,
+            '{' => i = skip_balanced(chars, i),
+            _ => {
+                let (d, next) = declaration(chars, i);
+                if let Some(d) = d {
+                    match d.name.as_str() {
+                        "font-family" => {
+                            let mut parts: Vec<String> = Vec::new();
+                            for v in &d.value {
+                                if let Value::Keyword(k) = v {
+                                    if k == "," {
+                                        break;
+                                    }
+                                    parts.push(k.clone());
+                                }
+                            }
+                            family = parts.join(" ");
+                        }
+                        "src" => {
+                            for v in &d.value {
+                                if let Value::Url(u) = v {
+                                    src = u.clone();
+                                    break;
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                i = next;
+            }
+        }
+    }
+    if family.is_empty() || src.is_empty() {
+        return (None, i);
+    }
+    (
+        Some(FontFace {
+            family: family.to_lowercase(),
+            src,
+        }),
+        i,
+    )
 }
 
 pub fn declarations(src: &str) -> Vec<Declaration> {
@@ -929,6 +1012,25 @@ fn find_seq(chars: &[char], from: usize, pat: &[char]) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn font_face_parsed() {
+        let s = parse(
+            "@font-face { font-family: Custom; src: url(a.ttf) } p { color: red } @media x { p { color: blue } }",
+        );
+        assert_eq!(s.faces.len(), 1);
+        assert_eq!(s.faces[0].family, "custom");
+        assert_eq!(s.faces[0].src, "a.ttf");
+        assert_eq!(s.rules.len(), 1);
+    }
+
+    #[test]
+    fn font_face_multi_word_family() {
+        let s = parse("@font-face { font-family: Comic Sans; src: url(f.ttf) } @font-face { family: x } p {}");
+        assert_eq!(s.faces.len(), 1);
+        assert_eq!(s.faces[0].family, "comic sans");
+        assert_eq!(s.rules.len(), 1);
+    }
 
     #[test]
     fn inline_declarations() {

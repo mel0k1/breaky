@@ -187,6 +187,18 @@ fn build_rec<'a>(
     }
 }
 
+pub fn family(computed: &HashMap<String, Vec<Value>>) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for v in computed.get("font-family").into_iter().flatten() {
+        match v {
+            Value::Keyword(k) if k == "," => break,
+            Value::Keyword(k) => parts.push(k.clone()),
+            _ => {}
+        }
+    }
+    parts.join(" ")
+}
+
 fn apply_decl(computed: &mut HashMap<String, Vec<Value>>, name: &str, value: Vec<Value>) {
     if name == "gap" {
         let mut vals = value.into_iter();
@@ -898,6 +910,22 @@ mod tests {
         let d = el(&s, "div");
         assert_eq!(d.computed["row-gap"], vec![px(7.0)]);
         assert_eq!(d.computed["column-gap"], vec![px(7.0)]);
+    }
+
+    #[test]
+    fn family_takes_first_list_entry() {
+        let dom = parse_html("<p style=\"font-family: Arial, sans-serif\">t</p>");
+        let sheet = parse_css("");
+        let s = build(&dom, &sheet);
+        assert_eq!(family(&el(&s, "p").computed), "arial");
+    }
+
+    #[test]
+    fn family_joins_multi_word() {
+        let dom = parse_html("<p style=\"font-family: Comic Sans MS, cursive\">t</p>");
+        let sheet = parse_css("");
+        let s = build(&dom, &sheet);
+        assert_eq!(family(&el(&s, "p").computed), "comic sans ms");
     }
 
     #[test]

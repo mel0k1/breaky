@@ -1,6 +1,6 @@
 use css::{Unit, Value};
 use html::{Node, NodeKind};
-use style::StyledNode;
+use style::{StyledNode, family as family_of};
 
 const BASE_FONT: f32 = 16.0;
 
@@ -924,6 +924,10 @@ fn default_display(name: &str) -> Display {
 }
 
 impl<'a> LayoutBox<'a> {
+    pub fn family(&self) -> String {
+        self.style().map(|s| family_of(&s.computed)).unwrap_or_default()
+    }
+
     fn style(&self) -> Option<&'a StyledNode<'a>> {
         match &self.kind {
             BoxKind::Block(s)
@@ -1092,10 +1096,17 @@ impl<'a> LayoutBox<'a> {
         self.text == Some(" ") && matches!(self.ws, WS::Normal | WS::NoWrap)
     }
 
-    fn extent(&self, parent_font: f32, parent_lh: f32, base: f32) -> (f32, f32, Va, bool) {
+    fn extent(
+        &self,
+        parent_family: &str,
+        parent_font: f32,
+        parent_lh: f32,
+        base: f32,
+    ) -> (f32, f32, Va, bool) {
         let font = self.font(parent_font);
-        let a = font::asc(font);
-        let d = font::desc(font);
+        let fam = self.family();
+        let a = font::asc_in(&fam, font);
+        let d = font::desc_in(&fam, font);
         let lh = self.line_height(font);
         let hl = (lh - a - d) / 2.0;
         let m = self.edges(Family::Margin, font, base);
@@ -1105,8 +1116,8 @@ impl<'a> LayoutBox<'a> {
             .element()
             .map(|s| va_of(s, font))
             .unwrap_or(Va::Baseline);
-        let pa = font::asc(parent_font);
-        let pd = font::desc(parent_font);
+        let pa = font::asc_in(parent_family, parent_font);
+        let pd = font::desc_in(parent_family, parent_font);
         let phl = (parent_lh - pa - pd) / 2.0;
         let shift = match va {
             Va::Baseline | Va::Top | Va::Bottom => 0.0,
@@ -1114,7 +1125,7 @@ impl<'a> LayoutBox<'a> {
             Va::Pct(k) => -k * lh / 100.0,
             Va::Sub => 0.25 * font,
             Va::Super => -0.25 * font,
-            Va::Middle => (a - d) / 2.0 - font::x_height(parent_font) / 2.0,
+            Va::Middle => (a - d) / 2.0 - font::x_height_in(parent_family, parent_font) / 2.0,
             Va::TextTop => (hl + a) - (phl + pa),
             Va::TextBottom => (phl + pd) - (lh - hl - a),
         };
@@ -1706,7 +1717,7 @@ impl<'a> LayoutBox<'a> {
             flow.y + self.dims.margin.top + self.dims.border.top + self.dims.padding.top;
         if self.element().map(list_inside).unwrap_or(false) {
             let mw = match (self.marker, self.marker_img) {
-                (Some(m), _) => font::width(m, font),
+                (Some(m), _) => font::width_in(&self.family(), m, font),
                 (None, Some(_)) => self.marker_size.0 + 2.0,
                 _ => 0.0,
             };
@@ -1968,7 +1979,8 @@ impl<'a> LayoutBox<'a> {
                 continue;
             }
             let mw = child.measure_w(font, full_r - full_l);
-            let (above, below, va, atomic) = child.extent(font, parent_lh, full_r - full_l);
+            let (above, below, va, atomic) =
+                child.extent(&self.family(), font, parent_lh, full_r - full_l);
             let band_h = est.max(above + below);
             let (l, r) = band(floats, *cy, band_h, full_l, full_r);
             if items.is_empty() {
@@ -2015,7 +2027,7 @@ impl<'a> LayoutBox<'a> {
             flow.y + self.dims.margin.top + self.dims.border.top + self.dims.padding.top;
         let w = self
             .num("width", font, flow.width)
-            .or_else(|| self.text.map(|t| font::width(t, font)));
+            .or_else(|| self.text.map(|t| font::width_in(&self.family(), t, font)));
         self.dims.content.width = w.unwrap_or(0.0);
         self.dims.content.height = self.line_height(font);
         let mut cx = self.dims.content.x;
@@ -2259,7 +2271,7 @@ impl<'a> LayoutBox<'a> {
     fn measure_w(&self, parent_font: f32, base: f32) -> f32 {
         let font = self.font(parent_font);
         if let Some(t) = self.text {
-            return font::width(t, font);
+            return font::width_in(&self.family(), t, font);
         }
         let m = self.edges(Family::Margin, font, base);
         let b = self.edges(Family::Border, font, base);
@@ -2278,7 +2290,7 @@ impl<'a> LayoutBox<'a> {
 
     fn max_content_w(&self, font: f32, base: f32) -> f32 {
         if let Some(t) = self.text {
-            return font::width(t, font);
+            return font::width_in(&self.family(), t, font);
         }
         let m = self.edges(Family::Margin, font, base);
         let b = self.edges(Family::Border, font, base);
