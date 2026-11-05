@@ -1,0 +1,18 @@
+<html><head><style>
+#inp { width: 220px; height: 40px; background: #eee; }
+#log { width: 300px; height: 30px; }
+</style></head><body>
+<div id="inp">[input]</div>
+<div id="log">keys: -</div>
+<script>
+var log = document.getElementById('log');
+var keys = [];
+document.getElementById('inp').addEventListener('focus', function () {
+  log.textContent = 'focused';
+});
+document.getElementById('inp').addEventListener('keydown', function (ev) {
+  keys.push(ev.key);
+  log.textContent = 'keys: ' + keys.join(' ');
+});
+</script>
+</body></html>

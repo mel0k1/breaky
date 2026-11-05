@@ -184,6 +184,57 @@ pub(super) fn dispatch_move(
     }
 }
 
+fn call_global(rt: &mut super::Runtime, name: &str, args: &[String]) -> Result<String, String> {
+    let cname = cstr(name);
+    unsafe {
+        let global = JS_GetGlobalObject(rt.ctx);
+        let f = JS_GetPropertyStr(rt.ctx, global, cname.as_ptr());
+        breaky_free_value(rt.ctx, global);
+        if f.tag == TAG_UNDEFINED || f.tag == TAG_NULL {
+            breaky_free_value(rt.ctx, f);
+            return Ok(String::new());
+        }
+        let vals: Vec<JSValue> = args.iter().map(|a| js_string(rt.ctx, a)).collect();
+        let ptr = if vals.is_empty() {
+            std::ptr::null()
+        } else {
+            vals.as_ptr()
+        };
+        let r = JS_Call(rt.ctx, f, js_undefined(), vals.len() as c_int, ptr);
+        breaky_free_value(rt.ctx, f);
+        for v in &vals {
+            breaky_free_value(rt.ctx, *v);
+        }
+        if breaky_is_exception(r) != 0 {
+            let e = JS_GetException(rt.ctx);
+            let msg = to_string(rt.ctx, e);
+            breaky_free_value(rt.ctx, e);
+            Err(msg)
+        } else {
+            let out = to_string(rt.ctx, r);
+            breaky_free_value(rt.ctx, r);
+            Ok(out)
+        }
+    }
+}
+
+pub(super) fn focus(rt: &mut super::Runtime, path: &[usize]) -> Result<bool, String> {
+    let out = call_global(rt, "__focus", &[encode_path(path)])?;
+    Ok(out == "true")
+}
+
+pub(super) fn active_path(rt: &mut super::Runtime) -> Option<Vec<usize>> {
+    let s = call_global(rt, "__active_path", &[]).ok()?;
+    decode_dotted(&s)
+}
+
+fn decode_dotted(s: &str) -> Option<Vec<usize>> {
+    if s.is_empty() || s.starts_with('!') {
+        return None;
+    }
+    s.split('.').map(|p| p.parse::<usize>().ok()).collect()
+}
+
 unsafe fn opaque(ctx: *mut JSContext) -> &'static mut DomState {
     let p = JS_GetContextOpaque(ctx) as *mut DomState;
     &mut *p
@@ -2383,5 +2434,68 @@ mod tests {
         assert_eq!(log_of(&mut rt), "over-a:P:P|out-a:P:P");
         assert_eq!(rt.dispatch_move(&[], 1.0, 1.0).unwrap(), false);
         assert_eq!(log_of(&mut rt), "over-a:P:P|out-a:P:P");
+    }
+
+    #[test]
+    fn focus_dispatches_blur_then_focus_pair() {
+        let mut dom = tree();
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        rt.eval(log_target()).unwrap();
+        rt.eval(
+            "var a = document.getElementById('a'); var b = document.getElementById('b'); a.addEventListener('focus', L('focus-a')); a.addEventListener('blur', L('blur-a')); b.addEventListener('focus', L('focus-b')); b.addEventListener('blur', L('blur-b'))",
+        )
+        .unwrap();
+        let pa = find_first(&dom, &|n| has_id(n, "a"), &mut Vec::new()).unwrap();
+        let pb = find_first(&dom, &|n| has_id(n, "b"), &mut Vec::new()).unwrap();
+        assert_eq!(rt.focus(&pa).unwrap(), true);
+        assert_eq!(log_of(&mut rt), "focus-a:P:P");
+        assert_eq!(rt.focus(&pb).unwrap(), true);
+        assert_eq!(log_of(&mut rt), "focus-a:P:P|blur-a:P:P|focus-b:P:P");
+        assert_eq!(rt.focus(&pb).unwrap(), false);
+        assert_eq!(log_of(&mut rt), "focus-a:P:P|blur-a:P:P|focus-b:P:P");
+    }
+
+    #[test]
+    fn active_element_tracks_focus_and_blur() {
+        let mut dom = tree();
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        rt.eval("var b = document.getElementById('b'); globalThis.__log = []; document.addEventListener('blur', function () { globalThis.__log.push('blur') })")
+            .unwrap();
+        assert_eq!(rt.eval("document.activeElement.tagName").unwrap(), "BODY");
+        let pb = find_first(&dom, &|n| has_id(n, "b"), &mut Vec::new()).unwrap();
+        rt.focus(&pb).unwrap();
+        assert_eq!(
+            rt.eval("document.activeElement.getAttribute('id')").unwrap(),
+            "b"
+        );
+        assert_eq!(rt.eval("b.blur()").unwrap(), "true");
+        assert_eq!(rt.eval("document.activeElement.tagName").unwrap(), "BODY");
+        assert_eq!(rt.eval("globalThis.__log.join('|')").unwrap(), "");
+    }
+
+    #[test]
+    fn keydown_lands_on_focused_element() {
+        let mut dom = tree();
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        rt.eval("var b = document.getElementById('b'); b.focus(); b.addEventListener('keydown', function (ev) { globalThis.__k = ev.key })")
+            .unwrap();
+        let pb = rt.active_path().unwrap();
+        let expected = find_first(&dom, &|n| has_id(n, "b"), &mut Vec::new()).unwrap();
+        assert_eq!(pb, expected);
+        rt.dispatch_event("keydown", &pb, 0.0, 0.0, "Enter").unwrap();
+        assert_eq!(rt.eval("globalThis.__k").unwrap(), "Enter");
+    }
+
+    #[test]
+    fn active_path_is_none_without_focus() {
+        let mut dom = tree();
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        assert_eq!(rt.active_path(), None);
+        rt.eval("document.getElementById('a').focus()").unwrap();
+        assert!(rt.active_path().is_some());
     }
 }

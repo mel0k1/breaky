@@ -93,7 +93,7 @@ fn event_cmd(args: &[String], typ: &str) {
     let remote = src.contains("://");
     let si = if remote { 3 } else { 4 };
     let target_arg = args.get(si).unwrap_or_else(|| usage());
-    let to_arg = if typ == "mouseover" {
+    let to_arg = if typ == "mouseover" || typ == "keydown" {
         args.get(si + 1).filter(|s| s.parse::<f32>().is_err())
     } else {
         None
@@ -188,7 +188,10 @@ fn event_cmd(args: &[String], typ: &str) {
             }
         }
     } else if typ == "keydown" {
-        Some(style::query_first(&dom, "body").unwrap_or_default())
+        match rt.active_path() {
+            Some(p) => Some(p),
+            None => Some(style::query_first(&dom, "body").unwrap_or_default()),
+        }
     } else {
         match style::query_first(&dom, target_arg) {
             Some(p) => Some(p),
@@ -199,21 +202,37 @@ fn event_cmd(args: &[String], typ: &str) {
         }
     };
     if let Some(to) = &to_arg {
-        match resolve_target(&dom, &styled, viewport, &imgs, target_arg) {
-            Ok(from) => match resolve_target(&dom, &styled, viewport, &imgs, to) {
-                Ok(dest) => {
-                    if let Err(e) = rt.dispatch_move(&from.0, from.1, from.2) {
+        if typ == "mouseover" {
+            match resolve_target(&dom, &styled, viewport, &imgs, target_arg) {
+                Ok(from) => match resolve_target(&dom, &styled, viewport, &imgs, to) {
+                    Ok(dest) => {
+                        if let Err(e) = rt.dispatch_move(&from.0, from.1, from.2) {
+                            eprintln!("{}", e);
+                        }
+                        match rt.dispatch_move(&dest.0, dest.1, dest.2) {
+                            Ok(true) => {}
+                            Ok(false) => eprintln!("hover unchanged"),
+                            Err(e) => eprintln!("{}", e),
+                        }
+                    }
+                    Err(e) => eprintln!("{}", e),
+                },
+                Err(e) => eprintln!("{}", e),
+            }
+        } else {
+            match resolve_target(&dom, &styled, viewport, &imgs, to) {
+                Ok(t) => {
+                    if let Err(e) = rt.focus(&t.0) {
                         eprintln!("{}", e);
                     }
-                    match rt.dispatch_move(&dest.0, dest.1, dest.2) {
+                    match rt.dispatch_event("keydown", &t.0, t.1, t.2, target_arg) {
                         Ok(true) => {}
-                        Ok(false) => eprintln!("hover unchanged"),
+                        Ok(false) => eprintln!("{}: no keydown handler", to),
                         Err(e) => eprintln!("{}", e),
                     }
                 }
                 Err(e) => eprintln!("{}", e),
-            },
-            Err(e) => eprintln!("{}", e),
+            }
         }
     } else if let Some(p) = &target {
         let (cx, cy) = if typ == "keydown" {
@@ -951,7 +970,7 @@ fn usage() -> ! {
     eprintln!("       breaky mouse <file> [style.css] <from> <to> [width] [out.png]");
     eprintln!("       breaky mouse <url> <selector|X,Y> [width] [out.png]");
     eprintln!("       breaky mouse <url> <from> <to> [width] [out.png]");
-    eprintln!("       breaky key <file> [style.css] <key> [width] [out.png]");
+    eprintln!("       breaky key <file> [style.css] <key> [<selector|X,Y>] [width] [out.png]");
     exit(2);
 }
 

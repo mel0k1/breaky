@@ -126,6 +126,14 @@ impl Runtime {
         dom::dispatch_move(self, path, x, y)
     }
 
+    pub fn focus(&mut self, path: &[usize]) -> Result<bool, String> {
+        dom::focus(self, path)
+    }
+
+    pub fn active_path(&mut self) -> Option<Vec<usize>> {
+        dom::active_path(self)
+    }
+
     pub fn set_rects(&mut self, rects: &HashMap<Vec<usize>, (f32, f32, f32, f32)>) {
         dom::set_rects(self, rects);
     }

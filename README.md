@@ -32,8 +32,11 @@ hit-tested against the layout boxes, then paints the result. `mouse` fires
 `mouseover` the same way, and with a second target it moves the pointer from
 the first to the second, dispatching `mouseout` on the old element and
 `mouseover` on the new one with `relatedTarget` set; `key` dispatches
-`keydown` with `ev.key` set
-(targeted at `body`, bubbling to `document`). Scripts in
+`keydown` with `ev.key` set — at an explicit focus target
+(`<selector|X,Y>` after the key) when given, else at
+`document.activeElement`, else at `body` — bubbling to `document`.
+`focus()`/`blur()` on elements dispatch non-bubbling `focus`/`blur` events
+and maintain `document.activeElement`, which defaults to `body`. Scripts in
 `<script>` tags (inline or `src`, local or remote) run in an embedded
 QuickJS engine and print through `console.log`. Scripts get live DOM
 bindings — `document.getElementById`, `document.body`,
@@ -144,6 +147,7 @@ Workspace of small crates:
 - [x] mouseover and keydown events (`breaky mouse`, `breaky key`), document-level listeners, `ev.key`
 - [x] getBoundingClientRect() over the layout boxes
 - [x] `new Event()` constructor and `dispatchEvent()` from JS, mouseover/mouseout pairs with previous-target tracking (`breaky mouse <from> <to>`)
+- [x] focus()/blur() with non-bubbling focus/blur events, `document.activeElement`, keydown on the focused element
 
 ## License
 

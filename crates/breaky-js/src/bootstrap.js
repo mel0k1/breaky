@@ -2,6 +2,7 @@
 globalThis.__els = [];
 globalThis.__clicks = {};
 globalThis.__listeners = {};
+globalThis.__active = null;
 function inside(q, base) {
   return q === base || q.indexOf(base + ".") === 0;
 }
@@ -209,6 +210,17 @@ globalThis.__move = function (path, xs, ys) {
   globalThis.__hover = next;
   return true;
 };
+globalThis.__focus = function (path) {
+  if (globalThis.__active === path) return false;
+  var prev = globalThis.__active;
+  globalThis.__active = path;
+  if (prev !== null) dispatch(new Event("blur"), prev);
+  dispatch(new Event("focus"), path);
+  return true;
+};
+globalThis.__active_path = function () {
+  return globalThis.__active === null ? "" : globalThis.__active;
+};
 function el(p) {
   var w = {
     __path: p,
@@ -299,6 +311,15 @@ function el(p) {
       if (!(ev instanceof Event)) throw new TypeError("dispatchEvent requires an Event");
       return dispatch(ev, this.__path);
     },
+    focus: function() {
+      return __focus(this.__path);
+    },
+    blur: function() {
+      if (globalThis.__active !== this.__path) return false;
+      globalThis.__active = null;
+      dispatch(new Event("blur"), this.__path);
+      return true;
+    },
     get onclick() {
       return globalThis.__clicks[this.__path] || null;
     },
@@ -372,6 +393,10 @@ globalThis.document = {
   dispatchEvent: function(ev) {
     if (!(ev instanceof Event)) throw new TypeError("dispatchEvent requires an Event");
     return dispatch(ev, "");
+  },
+  get activeElement() {
+    var p = globalThis.__active;
+    return p === null || p === undefined ? globalThis.document.body : el(p);
   },
   get body() {
     var p = __doc_body();
