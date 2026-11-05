@@ -1,0 +1,24 @@
+<!doctype html>
+<html>
+<head>
+<link rel="stylesheet" href="events.css">
+</head>
+<body>
+<h1>breaky events</h1>
+<div id="pad">hover me</div>
+<div id="log">keys:</div>
+<script>
+var pad = document.getElementById('pad');
+var log = document.getElementById('log');
+var keys = [];
+pad.addEventListener('mouseover', function (ev) {
+  pad.style.background = '#2f81f7';
+  pad.textContent = 'mouseover ' + ev.clientX + ',' + ev.clientY;
+});
+document.addEventListener('keydown', function (ev) {
+  keys.push(ev.key);
+  log.textContent = 'keys: ' + keys.join(' ');
+});
+</script>
+</body>
+</html>

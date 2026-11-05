@@ -27,7 +27,15 @@ fn main() {
         return;
     }
     if path == "click" {
-        click_cmd(&args);
+        event_cmd(&args, "click");
+        return;
+    }
+    if path == "mouse" {
+        event_cmd(&args, "mouseover");
+        return;
+    }
+    if path == "key" {
+        event_cmd(&args, "keydown");
         return;
     }
     if args.len() >= 6 {
@@ -80,7 +88,7 @@ fn main() {
     }
 }
 
-fn click_cmd(args: &[String]) {
+fn event_cmd(args: &[String], typ: &str) {
     let src = args.get(2).unwrap_or_else(|| usage());
     let remote = src.contains("://");
     let (si, vi, oi) = if remote { (3, 4, 5) } else { (4, 5, 6) };
@@ -89,7 +97,7 @@ fn click_cmd(args: &[String]) {
         .get(vi)
         .and_then(|s| s.parse::<f32>().ok())
         .unwrap_or(800.0);
-    let out = args.get(oi).map(|s| s.as_str()).unwrap_or("click.png");
+    let out = args.get(oi).map(|s| s.as_str()).unwrap_or("event.png");
     let mut client = net::Client::new();
     let (mut dom, css_text, base) = if remote {
         let (b, d, c) = remote_page(&mut client, src);
@@ -135,7 +143,11 @@ fn click_cmd(args: &[String]) {
             load_faces(&sheet, &styled, css_base, None);
         }
     }
-    let point = parse_point(target_arg);
+    let point = if typ == "keydown" {
+        None
+    } else {
+        parse_point(target_arg)
+    };
     let target: Option<Vec<usize>> = if let Some((x, y)) = point {
         match layout::layout_with(&styled, viewport, &imgs) {
             Some(tree) => {
@@ -154,6 +166,8 @@ fn click_cmd(args: &[String]) {
                 None
             }
         }
+    } else if typ == "keydown" {
+        Some(style::query_first(&dom, "body").unwrap_or_default())
     } else {
         match style::query_first(&dom, target_arg) {
             Some(p) => Some(p),
@@ -164,16 +178,21 @@ fn click_cmd(args: &[String]) {
         }
     };
     if let Some(p) = &target {
-        let (cx, cy) = match point {
-            Some(xy) => xy,
-            None => match layout::layout_with(&styled, viewport, &imgs) {
-                Some(tree) => box_center(&tree, node_at(&dom, p)).unwrap_or((0.0, 0.0)),
-                None => (0.0, 0.0),
-            },
+        let (cx, cy) = if typ == "keydown" {
+            (0.0, 0.0)
+        } else {
+            match point {
+                Some(xy) => xy,
+                None => match layout::layout_with(&styled, viewport, &imgs) {
+                    Some(tree) => box_center(&tree, node_at(&dom, p)).unwrap_or((0.0, 0.0)),
+                    None => (0.0, 0.0),
+                },
+            }
         };
-        match rt.dispatch_event("click", p, cx, cy) {
+        let key = if typ == "keydown" { target_arg.as_str() } else { "" };
+        match rt.dispatch_event(typ, p, cx, cy, key) {
             Ok(true) => {}
-            Ok(false) => eprintln!("{}: no click handler", target_arg),
+            Ok(false) => eprintln!("{}: no {} handler", target_arg, typ),
             Err(e) => eprintln!("{}", e),
         }
     }
@@ -833,6 +852,9 @@ fn usage() -> ! {
     eprintln!("       breaky animate <url> [width] [prefix]");
     eprintln!("       breaky click <file> [style.css] <selector|X,Y> [width] [out.png]");
     eprintln!("       breaky click <url> <selector|X,Y> [width] [out.png]");
+    eprintln!("       breaky mouse <file> [style.css] <selector|X,Y> [width] [out.png]");
+    eprintln!("       breaky mouse <url> <selector|X,Y> [width] [out.png]");
+    eprintln!("       breaky key <file> [style.css] <key> [width] [out.png]");
     exit(2);
 }
 

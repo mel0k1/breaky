@@ -116,8 +116,9 @@ impl Runtime {
         path: &[usize],
         x: f32,
         y: f32,
+        key: &str,
     ) -> Result<bool, String> {
-        dom::dispatch_event(self, typ, path, x, y)
+        dom::dispatch_event(self, typ, path, x, y, key)
     }
 
     pub fn eval(&mut self, src: &str) -> Result<String, String> {

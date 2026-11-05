@@ -94,16 +94,40 @@ function apply(raw) {
   remap(JSON.parse(raw).ops);
   return true;
 }
-globalThis.__fire = function(type, targetPath, xs, ys) {
+function addLs(key, type, fn, capture) {
+  if (typeof fn !== "function") return;
+  var cap = capture === true;
+  var ls = globalThis.__listeners[key];
+  if (!ls) {
+    ls = [];
+    globalThis.__listeners[key] = ls;
+  }
+  for (var i = 0; i < ls.length; i++) {
+    if (ls[i].type === type && ls[i].fn === fn && ls[i].capture === cap) return;
+  }
+  ls.push({ type: type, fn: fn, capture: cap });
+}
+function dropLs(key, type, fn, capture) {
+  var cap = capture === true;
+  var ls = globalThis.__listeners[key];
+  if (!ls) return;
+  for (var i = ls.length - 1; i >= 0; i--) {
+    if (ls[i].type === type && ls[i].fn === fn && ls[i].capture === cap) ls.splice(i, 1);
+  }
+}
+globalThis.__fire = function(type, targetPath, xs, ys, key) {
   var segs = targetPath === "" ? [] : targetPath.split(".");
   var chain = [];
   for (var s = segs.length; s >= 1; s--) chain.push(segs.slice(0, s).join("."));
+  chain.push("");
+  var tgt = targetPath === "" ? globalThis.document : el(targetPath);
   var ev = {
     type: type,
-    target: el(targetPath),
+    target: tgt,
     currentTarget: null,
     clientX: parseFloat(xs),
     clientY: parseFloat(ys),
+    key: key === undefined ? "" : String(key),
     button: 0,
     bubbles: true,
     defaultPrevented: false,
@@ -121,7 +145,7 @@ globalThis.__fire = function(type, targetPath, xs, ys) {
   var fired = 0;
   var ci, i, ls;
   for (ci = chain.length - 1; ci >= 0 && !ev.__stop; ci--) {
-    ev.currentTarget = el(chain[ci]);
+    ev.currentTarget = chain[ci] === "" ? globalThis.document : el(chain[ci]);
     ls = globalThis.__listeners[chain[ci]];
     if (!ls) continue;
     for (i = 0; i < ls.length && !ev.__stopNow; i++) {
@@ -132,7 +156,7 @@ globalThis.__fire = function(type, targetPath, xs, ys) {
     }
   }
   for (ci = 0; ci < chain.length && !ev.__stop; ci++) {
-    ev.currentTarget = el(chain[ci]);
+    ev.currentTarget = chain[ci] === "" ? globalThis.document : el(chain[ci]);
     ls = globalThis.__listeners[chain[ci]];
     if (ls) {
       for (i = 0; i < ls.length && !ev.__stopNow; i++) {
@@ -221,25 +245,10 @@ function el(p) {
       return c;
     },
     addEventListener: function(type, fn, capture) {
-      if (typeof fn !== "function") return;
-      var cap = capture === true;
-      var ls = globalThis.__listeners[this.__path];
-      if (!ls) {
-        ls = [];
-        globalThis.__listeners[this.__path] = ls;
-      }
-      for (var i = 0; i < ls.length; i++) {
-        if (ls[i].type === type && ls[i].fn === fn && ls[i].capture === cap) return;
-      }
-      ls.push({ type: type, fn: fn, capture: cap });
+      addLs(this.__path, type, fn, capture);
     },
     removeEventListener: function(type, fn, capture) {
-      var cap = capture === true;
-      var ls = globalThis.__listeners[this.__path];
-      if (!ls) return;
-      for (var i = ls.length - 1; i >= 0; i--) {
-        if (ls[i].type === type && ls[i].fn === fn && ls[i].capture === cap) ls.splice(i, 1);
-      }
+      dropLs(this.__path, type, fn, capture);
     },
     get onclick() {
       return globalThis.__clicks[this.__path] || null;
@@ -304,6 +313,12 @@ globalThis.document = {
   },
   querySelectorAll: function(sel) {
     return toEls(__doc_query_all(String(sel)));
+  },
+  addEventListener: function(type, fn, capture) {
+    addLs("", type, fn, capture);
+  },
+  removeEventListener: function(type, fn, capture) {
+    dropLs("", type, fn, capture);
   },
   get body() {
     var p = __doc_body();
