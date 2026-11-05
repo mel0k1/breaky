@@ -148,6 +148,13 @@ fn event_cmd(args: &[String], typ: &str) {
     } else {
         parse_point(target_arg)
     };
+    let mut rects: HashMap<Vec<usize>, (f32, f32, f32, f32)> = HashMap::new();
+    if let Some(tree) = layout::layout_with(&styled, viewport, &imgs) {
+        let mut map = HashMap::new();
+        addr_paths(&dom, &mut map, &mut Vec::new());
+        collect_rects(&tree, &map, &mut rects);
+        rt.set_rects(&rects);
+    }
     let target: Option<Vec<usize>> = if let Some((x, y)) = point {
         match layout::layout_with(&styled, viewport, &imgs) {
             Some(tree) => {
@@ -295,6 +302,32 @@ fn box_center(b: &layout::LayoutBox, node: &Node) -> Option<(f32, f32)> {
         }
     }
     None
+}
+
+fn collect_rects(
+    b: &layout::LayoutBox,
+    map: &HashMap<usize, Vec<usize>>,
+    out: &mut HashMap<Vec<usize>, (f32, f32, f32, f32)>,
+) {
+    for c in b.children.iter().chain(b.abs.iter()) {
+        collect_rects(c, map, out);
+    }
+    let node = match box_node(b) {
+        Some(n) => n,
+        None => return,
+    };
+    let path = match map.get(&(node as *const Node as usize)) {
+        Some(p) => p.clone(),
+        None => return,
+    };
+    let r = b.dims.border_box();
+    let e = out
+        .entry(path)
+        .or_insert((r.x, r.y, r.x + r.width, r.y + r.height));
+    e.0 = e.0.min(r.x);
+    e.1 = e.1.min(r.y);
+    e.2 = e.2.max(r.x + r.width);
+    e.3 = e.3.max(r.y + r.height);
 }
 
 fn transition_page(args: &[String]) {

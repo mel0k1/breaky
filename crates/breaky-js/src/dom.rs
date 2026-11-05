@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_int, c_void};
 
@@ -22,6 +23,7 @@ const CFUNC_GENERIC: c_int = 0;
 pub(super) struct DomState {
     root: *mut Node,
     parking: Vec<Option<Node>>,
+    rects: HashMap<String, (f32, f32, f32, f32)>,
 }
 
 const FUNCTIONS: &[(&str, JSCFunction)] = &[
@@ -44,6 +46,7 @@ const FUNCTIONS: &[(&str, JSCFunction)] = &[
     ("__el_query", el_query_one),
     ("__el_query_all", el_query_all),
     ("__el_clone", el_clone),
+    ("__el_rect", el_rect),
     ("__text_data", text_data),
     ("__text_set_data", text_set_data),
     ("__style_get", style_get),
@@ -54,6 +57,7 @@ pub(super) fn install(rt: &mut super::Runtime, root: &mut Node) {
     let st = Box::into_raw(Box::new(DomState {
         root: root as *mut Node,
         parking: Vec::new(),
+        rects: HashMap::new(),
     }));
     rt.dom = st;
     unsafe {
@@ -87,6 +91,17 @@ unsafe fn register(ctx: *mut JSContext, name: &str, f: JSCFunction) {
     let func = JS_NewCFunction2(ctx, f, cname.as_ptr(), 1, CFUNC_GENERIC, 0);
     JS_SetPropertyStr(ctx, global, cname.as_ptr(), func);
     breaky_free_value(ctx, global);
+}
+
+pub(super) fn set_rects(
+    rt: &mut super::Runtime,
+    rects: &HashMap<Vec<usize>, (f32, f32, f32, f32)>,
+) {
+    let st = unsafe { &mut *rt.dom };
+    st.rects.clear();
+    for (p, (x, y, r, b)) in rects {
+        st.rects.insert(encode_path(p), (*x, *y, *r, *b));
+    }
 }
 
 pub(super) fn dispatch_event(
@@ -675,6 +690,29 @@ unsafe extern "C" fn el_clone(
     };
     let slot = park(st, copy);
     js_string(ctx, &format!("!{}", slot))
+}
+
+unsafe extern "C" fn el_rect(
+    ctx: *mut JSContext,
+    _this: JSValue,
+    argc: c_int,
+    argv: *const JSValue,
+) -> JSValue {
+    let st = opaque(ctx);
+    let p = arg(ctx, argc, argv, 0);
+    match st.rects.get(&p) {
+        Some((x, y, r, b)) => js_string(
+            ctx,
+            &format!(
+                "{{\"x\":{},\"y\":{},\"width\":{},\"height\":{}}}",
+                x,
+                y,
+                r - x,
+                b - y
+            ),
+        ),
+        None => js_null(),
+    }
 }
 
 unsafe extern "C" fn text_data(
@@ -2093,5 +2131,56 @@ mod tests {
             false
         );
         assert_eq!(rt.eval("globalThis.__n === undefined").unwrap(), "true");
+    }
+
+    #[test]
+    fn getBoundingClientRect_returns_layout_rect() {
+        let mut dom = tree();
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        let mut rects = HashMap::new();
+        let pa = find_first(&dom, &|n| has_id(n, "a"), &mut Vec::new()).unwrap();
+        rects.insert(pa, (10.0, 20.0, 110.0, 70.0));
+        rt.set_rects(&rects);
+        assert_eq!(
+            rt.eval("var r = document.getElementById('a').getBoundingClientRect(); [r.x, r.y, r.width, r.height, r.left, r.top, r.right, r.bottom].join('|')").unwrap(),
+            "10|20|100|50|10|20|110|70"
+        );
+    }
+
+    #[test]
+    fn getBoundingClientRect_without_layout_is_zeroed() {
+        let mut dom = tree();
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        assert_eq!(
+            rt.eval("var r = document.getElementById('a').getBoundingClientRect(); [r.x, r.y, r.width, r.height].join('|')").unwrap(),
+            "0|0|0|0"
+        );
+    }
+
+    #[test]
+    fn set_rects_replaces_previous_rects() {
+        let mut dom = tree();
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        let pa = find_first(&dom, &|n| has_id(n, "a"), &mut Vec::new()).unwrap();
+        let pb = find_first(&dom, &|n| has_id(n, "b"), &mut Vec::new()).unwrap();
+        let mut rects = HashMap::new();
+        rects.insert(pa, (1.0, 2.0, 3.0, 4.0));
+        rt.set_rects(&rects);
+        rects.clear();
+        rects.insert(pb, (5.0, 6.0, 7.0, 8.0));
+        rt.set_rects(&rects);
+        assert_eq!(
+            rt.eval("var r = document.getElementById('a').getBoundingClientRect(); r.width")
+                .unwrap(),
+            "0"
+        );
+        assert_eq!(
+            rt.eval("document.getElementById('b').getBoundingClientRect().x")
+                .unwrap(),
+            "5"
+        );
     }
 }

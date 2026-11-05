@@ -1,6 +1,7 @@
 mod dom;
 
 use html::Node;
+use std::collections::HashMap;
 use std::ffi::CString;
 use std::os::raw::{c_char, c_int, c_void};
 
@@ -119,6 +120,10 @@ impl Runtime {
         key: &str,
     ) -> Result<bool, String> {
         dom::dispatch_event(self, typ, path, x, y, key)
+    }
+
+    pub fn set_rects(&mut self, rects: &HashMap<Vec<usize>, (f32, f32, f32, f32)>) {
+        dom::set_rects(self, rects);
     }
 
     pub fn eval(&mut self, src: &str) -> Result<String, String> {

@@ -222,6 +222,15 @@ function el(p) {
       var p = __el_clone(this.__path, deep === true);
       return p === null ? null : el(p);
     },
+    getBoundingClientRect: function() {
+      var raw = __el_rect(this.__path);
+      var r = raw === null ? { x: 0, y: 0, width: 0, height: 0 } : JSON.parse(raw);
+      r.left = r.x;
+      r.top = r.y;
+      r.right = r.x + r.width;
+      r.bottom = r.y + r.height;
+      return r;
+    },
     appendChild: function(c) {
       if (!c || typeof c.__path !== "string") return null;
       var cp = c.__path;
