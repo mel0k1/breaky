@@ -110,8 +110,14 @@ impl Runtime {
         dom::install(self, root);
     }
 
-    pub fn dispatch_click(&mut self, path: &[usize]) -> Result<bool, String> {
-        dom::dispatch_click(self, path)
+    pub fn dispatch_event(
+        &mut self,
+        typ: &str,
+        path: &[usize],
+        x: f32,
+        y: f32,
+    ) -> Result<bool, String> {
+        dom::dispatch_event(self, typ, path, x, y)
     }
 
     pub fn eval(&mut self, src: &str) -> Result<String, String> {

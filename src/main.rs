@@ -112,9 +112,9 @@ fn click_cmd(args: &[String]) {
         None => run_scripts(&scripts, &mut dom, base_html, None),
     };
     match style::query_first(&dom, selector) {
-        Some(p) => match rt.dispatch_click(&p) {
+        Some(p) => match rt.dispatch_event("click", &p, 0.0, 0.0) {
             Ok(true) => {}
-            Ok(false) => eprintln!("{}: no onclick handler", selector),
+            Ok(false) => eprintln!("{}: no click handler", selector),
             Err(e) => eprintln!("{}", e),
         },
         None => eprintln!("{}: no match", selector),

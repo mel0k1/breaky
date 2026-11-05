@@ -1,6 +1,7 @@
 (function() {
 globalThis.__els = [];
 globalThis.__clicks = {};
+globalThis.__listeners = {};
 function inside(q, base) {
   return q === base || q.indexOf(base + ".") === 0;
 }
@@ -17,7 +18,9 @@ function shiftKey(q, par, ix, up) {
   return par + "." + nk + (dot === -1 ? "" : rel.slice(dot));
 }
 function remap(ops) {
-  var fly = [];
+  var flyW = [];
+  var flyC = [];
+  var flyL = [];
   for (var oi = 0; oi < ops.length; oi++) {
     var op = ops[oi];
     if (op.take !== undefined) {
@@ -33,14 +36,15 @@ function remap(ops) {
           if (op.park !== undefined) {
             els[i].__path = op.park + q.slice(from.length);
           } else {
-            fly.push({ w: els[i], suffix: q.slice(from.length) });
+            flyW.push({ w: els[i], suffix: q.slice(from.length) });
             els[i].__path = null;
           }
           continue;
         }
         els[i].__path = shiftKey(q, par, ix, false);
       }
-      globalThis.__clicks = retake(globalThis.__clicks, from, op.park, par, ix, fly);
+      globalThis.__clicks = retake(globalThis.__clicks, from, op.park, par, ix, flyC);
+      globalThis.__listeners = retake(globalThis.__listeners, from, op.park, par, ix, flyL);
     } else if (op.put !== undefined) {
       var at = op.put.at;
       var pix = op.put.index;
@@ -48,14 +52,15 @@ function remap(ops) {
       for (var i = 0; i < els.length; i++) {
         var q = els[i].__path;
         if (q === null) {
-          for (var f = 0; f < fly.length; f++) {
-            if (fly[f].w === els[i]) els[i].__path = at + "." + pix + fly[f].suffix;
+          for (var f = 0; f < flyW.length; f++) {
+            if (flyW[f].w === els[i]) els[i].__path = at + "." + pix + flyW[f].suffix;
           }
           continue;
         }
         els[i].__path = shiftKey(q, at, pix, true);
       }
-      globalThis.__clicks = reput(globalThis.__clicks, at, pix, fly);
+      globalThis.__clicks = reput(globalThis.__clicks, at, pix, flyC);
+      globalThis.__listeners = reput(globalThis.__listeners, at, pix, flyL);
     }
   }
 }
@@ -89,6 +94,61 @@ function apply(raw) {
   remap(JSON.parse(raw).ops);
   return true;
 }
+globalThis.__fire = function(type, targetPath, xs, ys) {
+  var segs = targetPath === "" ? [] : targetPath.split(".");
+  var chain = [];
+  for (var s = segs.length; s >= 1; s--) chain.push(segs.slice(0, s).join("."));
+  var ev = {
+    type: type,
+    target: el(targetPath),
+    currentTarget: null,
+    clientX: parseFloat(xs),
+    clientY: parseFloat(ys),
+    button: 0,
+    bubbles: true,
+    defaultPrevented: false,
+    preventDefault: function() {
+      ev.defaultPrevented = true;
+    },
+    stopPropagation: function() {
+      ev.__stop = true;
+    },
+    stopImmediatePropagation: function() {
+      ev.__stop = true;
+      ev.__stopNow = true;
+    },
+  };
+  var fired = 0;
+  var ci, i, ls;
+  for (ci = chain.length - 1; ci >= 0 && !ev.__stop; ci--) {
+    ev.currentTarget = el(chain[ci]);
+    ls = globalThis.__listeners[chain[ci]];
+    if (!ls) continue;
+    for (i = 0; i < ls.length && !ev.__stopNow; i++) {
+      if (ls[i].type === type && ls[i].capture) {
+        ls[i].fn.call(ev.currentTarget, ev);
+        fired++;
+      }
+    }
+  }
+  for (ci = 0; ci < chain.length && !ev.__stop; ci++) {
+    ev.currentTarget = el(chain[ci]);
+    ls = globalThis.__listeners[chain[ci]];
+    if (ls) {
+      for (i = 0; i < ls.length && !ev.__stopNow; i++) {
+        if (ls[i].type === type && !ls[i].capture) {
+          ls[i].fn.call(ev.currentTarget, ev);
+          fired++;
+        }
+      }
+    }
+    if (type === "click" && globalThis.__clicks[chain[ci]]) {
+      globalThis.__clicks[chain[ci]].call(ev.currentTarget, ev);
+      fired++;
+    }
+  }
+  return fired > 0;
+};
 function el(p) {
   var w = {
     __path: p,
@@ -147,6 +207,27 @@ function el(p) {
       var raw = __el_remove(this.__path, cp);
       if (!apply(raw)) return null;
       return c;
+    },
+    addEventListener: function(type, fn, capture) {
+      if (typeof fn !== "function") return;
+      var cap = capture === true;
+      var ls = globalThis.__listeners[this.__path];
+      if (!ls) {
+        ls = [];
+        globalThis.__listeners[this.__path] = ls;
+      }
+      for (var i = 0; i < ls.length; i++) {
+        if (ls[i].type === type && ls[i].fn === fn && ls[i].capture === cap) return;
+      }
+      ls.push({ type: type, fn: fn, capture: cap });
+    },
+    removeEventListener: function(type, fn, capture) {
+      var cap = capture === true;
+      var ls = globalThis.__listeners[this.__path];
+      if (!ls) return;
+      for (var i = ls.length - 1; i >= 0; i--) {
+        if (ls[i].type === type && ls[i].fn === fn && ls[i].capture === cap) ls.splice(i, 1);
+      }
     },
     get onclick() {
       return globalThis.__clicks[this.__path] || null;

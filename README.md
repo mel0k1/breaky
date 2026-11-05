@@ -36,6 +36,10 @@ bindings — `document.getElementById`, `document.body`, `querySelector`,
 properties and `onclick` handlers — and mutations take effect before the page
 is styled, laid out and painted. Element wrappers keep pointing at their nodes
 across tree mutations, and `onclick` handlers survive moves and reindexing.
+Handlers get a real event object — `type`, `target`, `currentTarget`,
+`clientX`/`clientY`, `button`, `preventDefault`, `stopPropagation` — and
+`addEventListener(type, fn, capture)` dispatches through capture and bubble
+phases up the ancestor chain.
 
 ## Architecture
 
@@ -118,6 +122,7 @@ Workspace of small crates:
 - [x] DOM bindings (getElementById, innerHTML, textContent, attributes, inline styles)
 - [x] DOM construction (createElement, appendChild, insertBefore, removeChild, querySelector, stable wrappers across mutations)
 - [x] Events (onclick handlers, `breaky click <selector>` command)
+- [x] addEventListener/removeEventListener with capture and bubbling, event object with click coordinates
 
 ## License
 

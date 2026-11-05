@@ -82,33 +82,42 @@ unsafe fn register(ctx: *mut JSContext, name: &str, f: JSCFunction) {
     breaky_free_value(ctx, global);
 }
 
-pub(super) fn dispatch_click(rt: &mut super::Runtime, path: &[usize]) -> Result<bool, String> {
-    let key = cstr(&encode_path(path));
-    let reg_name = cstr("__clicks");
+pub(super) fn dispatch_event(
+    rt: &mut super::Runtime,
+    typ: &str,
+    path: &[usize],
+    x: f32,
+    y: f32,
+) -> Result<bool, String> {
+    let name = cstr("__fire");
     unsafe {
         let global = JS_GetGlobalObject(rt.ctx);
-        let reg = JS_GetPropertyStr(rt.ctx, global, reg_name.as_ptr());
+        let f = JS_GetPropertyStr(rt.ctx, global, name.as_ptr());
         breaky_free_value(rt.ctx, global);
-        if reg.tag == TAG_UNDEFINED || reg.tag == TAG_NULL {
-            breaky_free_value(rt.ctx, reg);
-            return Ok(false);
-        }
-        let f = JS_GetPropertyStr(rt.ctx, reg, key.as_ptr());
-        breaky_free_value(rt.ctx, reg);
         if f.tag == TAG_UNDEFINED || f.tag == TAG_NULL {
             breaky_free_value(rt.ctx, f);
             return Ok(false);
         }
-        let r = JS_Call(rt.ctx, f, js_undefined(), 0, std::ptr::null());
+        let args = [
+            js_string(rt.ctx, typ),
+            js_string(rt.ctx, &encode_path(path)),
+            js_string(rt.ctx, &format!("{}", x)),
+            js_string(rt.ctx, &format!("{}", y)),
+        ];
+        let r = JS_Call(rt.ctx, f, js_undefined(), 4, args.as_ptr());
         breaky_free_value(rt.ctx, f);
+        for a in &args {
+            breaky_free_value(rt.ctx, *a);
+        }
         if breaky_is_exception(r) != 0 {
             let e = JS_GetException(rt.ctx);
             let msg = to_string(rt.ctx, e);
             breaky_free_value(rt.ctx, e);
             Err(msg)
         } else {
+            let out = to_string(rt.ctx, r) == "true";
             breaky_free_value(rt.ctx, r);
-            Ok(true)
+            Ok(out)
         }
     }
 }
@@ -1198,7 +1207,7 @@ mod tests {
             "function"
         );
         let path = find_first(&dom, &|n| has_id(n, "a"), &mut Vec::new()).unwrap();
-        assert_eq!(rt.dispatch_click(&path).unwrap(), true);
+        assert_eq!(rt.dispatch_event("click", &path, 0.0, 0.0).unwrap(), true);
         assert_eq!(
             by_id(&dom, "a").children,
             vec![Node::new(NodeKind::Text("clicked".into()))]
@@ -1211,7 +1220,7 @@ mod tests {
         let mut rt = Runtime::new();
         rt.bind_dom(&mut dom);
         let path = find_first(&dom, &|n| has_id(n, "a"), &mut Vec::new()).unwrap();
-        assert_eq!(rt.dispatch_click(&path).unwrap(), false);
+        assert_eq!(rt.dispatch_event("click", &path, 0.0, 0.0).unwrap(), false);
     }
 
     #[test]
@@ -1228,7 +1237,7 @@ mod tests {
             "true"
         );
         let path = find_first(&dom, &|n| has_id(n, "a"), &mut Vec::new()).unwrap();
-        assert_eq!(rt.dispatch_click(&path).unwrap(), false);
+        assert_eq!(rt.dispatch_event("click", &path, 0.0, 0.0).unwrap(), false);
     }
 
     #[test]
@@ -1239,7 +1248,7 @@ mod tests {
         rt.eval("document.getElementById('a').onclick = function () { null.foo }")
             .unwrap();
         let path = find_first(&dom, &|n| has_id(n, "a"), &mut Vec::new()).unwrap();
-        assert!(rt.dispatch_click(&path).unwrap_err().contains("TypeError"));
+        assert!(rt.dispatch_event("click", &path, 0.0, 0.0).unwrap_err().contains("TypeError"));
     }
 
     #[test]
@@ -1384,7 +1393,7 @@ mod tests {
         rt.eval("document.body.insertBefore(document.createElement('div'), b)")
             .unwrap();
         let new_path = find_first(&dom, &|n| has_id(n, "b"), &mut Vec::new()).unwrap();
-        assert_eq!(rt.dispatch_click(&new_path).unwrap(), true);
+        assert_eq!(rt.dispatch_event("click", &new_path, 0.0, 0.0).unwrap(), true);
         assert_eq!(
             by_id(&dom, "b").children,
             vec![Node::new(NodeKind::Text("hit".into()))]
@@ -1434,5 +1443,208 @@ mod tests {
             end.children[0].children,
             vec![Node::new(NodeKind::Text("again".into()))]
         );
+    }
+
+    fn log_target() -> &'static str {
+        "globalThis.__log = []; function L(tag) { return function (ev) { globalThis.__log.push(tag + ':' + ev.currentTarget.tagName + ':' + ev.target.tagName) } }"
+    }
+
+    fn log_of(rt: &mut Runtime) -> String {
+        rt.eval("globalThis.__log.join('|')").unwrap()
+    }
+
+    #[test]
+    fn addEventListener_receives_event_object() {
+        let mut dom = tree();
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        rt.eval(
+            "document.getElementById('a').addEventListener('click', function (ev) { globalThis.__r = [ev.type, ev.clientX, ev.clientY, ev.target.tagName, ev.currentTarget.tagName, ev.bubbles, ev.defaultPrevented] })",
+        )
+        .unwrap();
+        let path = find_first(&dom, &|n| has_id(n, "a"), &mut Vec::new()).unwrap();
+        assert_eq!(
+            rt.dispatch_event("click", &path, 12.5, 7.0).unwrap(),
+            true
+        );
+        assert_eq!(
+            rt.eval("globalThis.__r.join('|')").unwrap(),
+            "click|12.5|7|P|P|true|false"
+        );
+    }
+
+    #[test]
+    fn bubbling_reaches_ancestors_with_current_target() {
+        let mut dom = tree();
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        rt.eval(log_target()).unwrap();
+        rt.eval("document.getElementById('a').addEventListener('click', L('p'))")
+            .unwrap();
+        rt.eval("document.body.addEventListener('click', L('body'))")
+            .unwrap();
+        let path = find_first(&dom, &|n| has_id(n, "a"), &mut Vec::new()).unwrap();
+        assert_eq!(rt.dispatch_event("click", &path, 0.0, 0.0).unwrap(), true);
+        assert_eq!(log_of(&mut rt), "p:P:P|body:BODY:P");
+    }
+
+    #[test]
+    fn capture_phase_runs_before_target() {
+        let mut dom = tree();
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        rt.eval(log_target()).unwrap();
+        rt.eval("document.body.addEventListener('click', L('cap'), true)")
+            .unwrap();
+        rt.eval("document.getElementById('a').addEventListener('click', L('p'))")
+            .unwrap();
+        let path = find_first(&dom, &|n| has_id(n, "a"), &mut Vec::new()).unwrap();
+        rt.dispatch_event("click", &path, 0.0, 0.0).unwrap();
+        assert_eq!(log_of(&mut rt), "cap:BODY:P|p:P:P");
+    }
+
+    #[test]
+    fn stop_propagation_blocks_ancestors() {
+        let mut dom = tree();
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        rt.eval(log_target()).unwrap();
+        rt.eval(
+            "document.getElementById('a').addEventListener('click', function (ev) { globalThis.__log.push('p'); ev.stopPropagation() })",
+        )
+        .unwrap();
+        rt.eval("document.body.addEventListener('click', L('body'))")
+            .unwrap();
+        let path = find_first(&dom, &|n| has_id(n, "a"), &mut Vec::new()).unwrap();
+        assert_eq!(rt.dispatch_event("click", &path, 0.0, 0.0).unwrap(), true);
+        assert_eq!(log_of(&mut rt), "p");
+    }
+
+    #[test]
+    fn remove_event_listener_stops_calls() {
+        let mut dom = tree();
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        rt.eval(
+            "var f = function () { globalThis.__n = (globalThis.__n || 0) + 1 }; var a = document.getElementById('a'); a.addEventListener('click', f); a.removeEventListener('click', f)",
+        )
+        .unwrap();
+        let path = find_first(&dom, &|n| has_id(n, "a"), &mut Vec::new()).unwrap();
+        assert_eq!(rt.dispatch_event("click", &path, 0.0, 0.0).unwrap(), false);
+        assert_eq!(rt.eval("globalThis.__n === undefined").unwrap(), "true");
+    }
+
+    #[test]
+    fn same_listener_is_deduped() {
+        let mut dom = tree();
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        rt.eval(
+            "var f = function () { globalThis.__n = (globalThis.__n || 0) + 1 }; var a = document.getElementById('a'); a.addEventListener('click', f); a.addEventListener('click', f)",
+        )
+        .unwrap();
+        let path = find_first(&dom, &|n| has_id(n, "a"), &mut Vec::new()).unwrap();
+        rt.dispatch_event("click", &path, 0.0, 0.0).unwrap();
+        assert_eq!(rt.eval("globalThis.__n").unwrap(), "1");
+    }
+
+    #[test]
+    fn capture_flag_keeps_two_entries() {
+        let mut dom = tree();
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        rt.eval(
+            "var f = function () { globalThis.__n = (globalThis.__n || 0) + 1 }; var a = document.getElementById('a'); a.addEventListener('click', f, true); a.addEventListener('click', f)",
+        )
+        .unwrap();
+        let path = find_first(&dom, &|n| has_id(n, "a"), &mut Vec::new()).unwrap();
+        rt.dispatch_event("click", &path, 0.0, 0.0).unwrap();
+        assert_eq!(rt.eval("globalThis.__n").unwrap(), "2");
+    }
+
+    #[test]
+    fn onclick_and_add_listener_coexist() {
+        let mut dom = tree();
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        rt.eval(log_target()).unwrap();
+        rt.eval("document.getElementById('a').addEventListener('click', L('lst'))")
+            .unwrap();
+        rt.eval("document.getElementById('a').onclick = function () { globalThis.__log.push('onc') }")
+            .unwrap();
+        let path = find_first(&dom, &|n| has_id(n, "a"), &mut Vec::new()).unwrap();
+        rt.dispatch_event("click", &path, 0.0, 0.0).unwrap();
+        assert_eq!(log_of(&mut rt), "lst:P:P|onc");
+    }
+
+    #[test]
+    fn listeners_survive_insert_before() {
+        let mut dom = tree();
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        rt.eval("var b = document.getElementById('b')").unwrap();
+        rt.eval("b.addEventListener('click', function () { b.textContent = 'live' })")
+            .unwrap();
+        rt.eval("document.body.insertBefore(document.createElement('div'), b)")
+            .unwrap();
+        let new_path = find_first(&dom, &|n| has_id(n, "b"), &mut Vec::new()).unwrap();
+        assert_eq!(
+            rt.dispatch_event("click", &new_path, 0.0, 0.0).unwrap(),
+            true
+        );
+        assert_eq!(
+            by_id(&dom, "b").children,
+            vec![Node::new(NodeKind::Text("live".into()))]
+        );
+    }
+
+    #[test]
+    fn listeners_survive_remove_and_reinsert() {
+        let mut dom = tree();
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        rt.eval("var a = document.getElementById('a')").unwrap();
+        rt.eval("a.addEventListener('click', function () { a.textContent = 'z' })")
+            .unwrap();
+        rt.eval("document.body.removeChild(a)").unwrap();
+        rt.eval("document.body.appendChild(a)").unwrap();
+        let new_path = find_first(&dom, &|n| has_id(n, "a"), &mut Vec::new()).unwrap();
+        rt.dispatch_event("click", &new_path, 0.0, 0.0).unwrap();
+        assert_eq!(
+            by_id(&dom, "a").children,
+            vec![Node::new(NodeKind::Text("z".into()))]
+        );
+    }
+
+    #[test]
+    fn other_event_types_do_not_trigger_click_handlers() {
+        let mut dom = tree();
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        rt.eval("document.getElementById('a').onclick = function () { globalThis.__n = 1 }")
+            .unwrap();
+        let path = find_first(&dom, &|n| has_id(n, "a"), &mut Vec::new()).unwrap();
+        assert_eq!(
+            rt.dispatch_event("mouseover", &path, 0.0, 0.0).unwrap(),
+            false
+        );
+        assert_eq!(rt.eval("globalThis.__n === undefined").unwrap(), "true");
+        assert_eq!(rt.dispatch_event("click", &path, 0.0, 0.0).unwrap(), true);
+    }
+
+    #[test]
+    fn handler_error_propagates_from_dispatch() {
+        let mut dom = tree();
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        rt.eval(
+            "document.getElementById('a').addEventListener('click', function () { null.foo })",
+        )
+        .unwrap();
+        let path = find_first(&dom, &|n| has_id(n, "a"), &mut Vec::new()).unwrap();
+        assert!(rt
+            .dispatch_event("click", &path, 0.0, 0.0)
+            .unwrap_err()
+            .contains("TypeError"));
     }
 }
