@@ -20,6 +20,10 @@ fn main() {
         anim_cmd(&args);
         return;
     }
+    if path == "animate" {
+        animate_cmd(&args);
+        return;
+    }
     if args.len() >= 6 {
         transition_page(&args);
         return;
@@ -46,14 +50,15 @@ fn main() {
             .and_then(|s| s.parse::<f32>().ok())
             .unwrap_or(800.0);
         let mut imgs = img::Store::new();
+        let mut anims = img::AnimStore::new();
         let mut urls: Vec<String> = Vec::new();
         gather_images(&styled, &mut urls);
         let base_css = Path::new(css).parent().unwrap_or(Path::new("."));
-        load_local_images(&urls, base_css, &mut imgs);
+        load_local_images(&urls, base_css, &mut imgs, &mut anims);
         let mut srcs: Vec<String> = Vec::new();
         gather_dom_images(&dom, &mut srcs);
         let base_html = Path::new(path).parent().unwrap_or(Path::new("."));
-        load_local_images(&srcs, base_html, &mut imgs);
+        load_local_images(&srcs, base_html, &mut imgs, &mut anims);
         if let Some(tree) = layout::layout_with(&styled, viewport, &imgs) {
             println!();
             layout::print_tree(&tree, 0);
@@ -88,14 +93,15 @@ fn transition_page(args: &[String]) {
     print_styled(&merged, 0);
     let viewport = args[4].parse::<f32>().unwrap_or(800.0);
     let mut imgs = img::Store::new();
+    let mut anims = img::AnimStore::new();
     let mut urls: Vec<String> = Vec::new();
     gather_images(&merged, &mut urls);
     let base_css = Path::new(&args[2]).parent().unwrap_or(Path::new("."));
-    load_local_images(&urls, base_css, &mut imgs);
+    load_local_images(&urls, base_css, &mut imgs, &mut anims);
     let mut srcs: Vec<String> = Vec::new();
     gather_dom_images(&dom, &mut srcs);
     let base_html = Path::new(&args[1]).parent().unwrap_or(Path::new("."));
-    load_local_images(&srcs, base_html, &mut imgs);
+    load_local_images(&srcs, base_html, &mut imgs, &mut anims);
     if let Some(tree) = layout::layout_with(&merged, viewport, &imgs) {
         println!();
         layout::print_tree(&tree, 0);
@@ -183,6 +189,64 @@ fn anim_cmd(args: &[String]) {
     }
 }
 
+fn animate_cmd(args: &[String]) {
+    let src = args.get(2).unwrap_or_else(|| usage());
+    let viewport = args
+        .get(4)
+        .and_then(|s| s.parse::<f32>().ok())
+        .unwrap_or(800.0);
+    let prefix = args.get(5).map(|s| s.as_str()).unwrap_or("frame");
+    let html_text = fs::read_to_string(src).unwrap_or_else(fail);
+    let dom = html::parse(&html_text);
+    let mut css_text = String::new();
+    if let Some(p) = args.get(3).filter(|p| !p.is_empty()) {
+        css_text = fs::read_to_string(p).unwrap_or_else(fail);
+    }
+    style::collect_css(&dom, &mut css_text);
+    let sheet = css::parse(&css_text);
+    let styled = build(&dom, &sheet);
+    let mut imgs = img::Store::new();
+    let mut anims = img::AnimStore::new();
+    let mut urls: Vec<String> = Vec::new();
+    gather_images(&styled, &mut urls);
+    let base_css = args
+        .get(3)
+        .filter(|p| !p.is_empty())
+        .map(|p| Path::new(p).parent().unwrap_or(Path::new(".")));
+    load_local_images(&urls, base_css.unwrap_or(Path::new(".")), &mut imgs, &mut anims);
+    let mut srcs: Vec<String> = Vec::new();
+    gather_dom_images(&dom, &mut srcs);
+    let base_html = Path::new(src).parent().unwrap_or(Path::new("."));
+    load_local_images(&srcs, base_html, &mut imgs, &mut anims);
+    let tree = match layout::layout_with(&styled, viewport, &imgs) {
+        Some(t) => t,
+        None => {
+            eprintln!("layout failed");
+            exit(1);
+        }
+    };
+    let total = anims.duration();
+    let start = std::time::Instant::now();
+    let mut now = 0u32;
+    let mut i = 0usize;
+    loop {
+        let canvas = render::paint_at(&tree, viewport, &imgs, &anims, now);
+        let name = format!("{}.{}.png", prefix, i);
+        fs::write(&name, canvas.to_png()).unwrap_or_else(fail);
+        println!("{} {}ms", name, now);
+        let d = anims.next_tick(now);
+        if d == 0 || now + d >= total {
+            break;
+        }
+        i += 1;
+        now += d;
+        let target = start + std::time::Duration::from_millis(now as u64);
+        if let Some(w) = target.checked_duration_since(std::time::Instant::now()) {
+            std::thread::sleep(w);
+        }
+    }
+}
+
 fn load_font() {
     if let Ok(p) = env::var("BREAKY_FONT") {
         if let Ok(b) = fs::read(&p) {
@@ -249,11 +313,23 @@ fn gather_dom_images(node: &Node, out: &mut Vec<String>) {
     }
 }
 
-fn load_local_images(urls: &[String], base: &Path, store: &mut img::Store) {
+fn load_local_images(
+    urls: &[String],
+    base: &Path,
+    imgs: &mut img::Store,
+    anims: &mut img::AnimStore,
+) {
     for u in urls {
         match fs::read(base.join(u)) {
-            Ok(bytes) => match img::decode(&bytes) {
-                Some(im) => store.insert(u.clone(), im),
+            Ok(bytes) => match img::decode_anim(&bytes) {
+                Some(a) => {
+                    if let Some(f) = a.frames.first() {
+                        imgs.insert(u.clone(), f.image.clone());
+                    }
+                    if a.frames.len() > 1 {
+                        anims.insert(u.clone(), a);
+                    }
+                }
                 None => eprintln!("{}: unsupported image", u),
             },
             Err(e) => eprintln!("{}: {}", u, e),
@@ -348,5 +424,6 @@ fn usage() -> ! {
     eprintln!("       breaky <file> <style.css> <target.css> <width> <out.png> [t]");
     eprintln!("       breaky fetch <url> [width] [out.png]");
     eprintln!("       breaky anim <file|url> [prefix]");
+    eprintln!("       breaky animate <file> [style.css] [width] [prefix]");
     exit(2);
 }

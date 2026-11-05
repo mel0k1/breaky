@@ -424,11 +424,43 @@ impl Canvas {
     }
 }
 
+pub struct Scene<'a> {
+    imgs: &'a img::Store,
+    anims: &'a img::AnimStore,
+    now: u32,
+}
+
+impl<'a> Scene<'a> {
+    fn frame(&self, url: &str) -> Option<&Image> {
+        if let Some(a) = self.anims.get(url) {
+            if a.frames.len() > 1 {
+                return Some(&a.frame_at(self.now).image);
+            }
+        }
+        self.imgs.get(url)
+    }
+}
+
 pub fn paint(root: &LayoutBox, viewport_width: f32) -> Canvas {
     paint_with(root, viewport_width, &img::Store::new())
 }
 
 pub fn paint_with(root: &LayoutBox, viewport_width: f32, imgs: &img::Store) -> Canvas {
+    paint_at(root, viewport_width, imgs, &img::AnimStore::new(), 0)
+}
+
+pub fn paint_at(
+    root: &LayoutBox,
+    viewport_width: f32,
+    imgs: &img::Store,
+    anims: &img::AnimStore,
+    now: u32,
+) -> Canvas {
+    let s = Scene {
+        imgs,
+        anims,
+        now,
+    };
     let bb = root.dims.border_box();
     let height = ((bb.y + bb.height)
         .max(max_bottom(root))
@@ -447,7 +479,7 @@ pub fn paint_with(root: &LayoutBox, viewport_width: f32, imgs: &img::Store) -> C
             c,
         );
     }
-    paint_box(&mut canvas, root, imgs);
+    paint_box(&mut canvas, root, &s);
     canvas
 }
 
@@ -570,12 +602,12 @@ fn sample_bilinear(img: &Image, sx: f32, sy: f32) -> Color {
     }
 }
 
-fn paint_img(canvas: &mut Canvas, b: &LayoutBox, imgs: &img::Store) {
+fn paint_img(canvas: &mut Canvas, b: &LayoutBox, s: &Scene) {
     let (src, ..) = match b.img {
         Some(v) => v,
         None => return,
     };
-    let im = match imgs.get(src) {
+    let im = match s.frame(src) {
         Some(im) => im,
         None => return,
     };
@@ -809,18 +841,18 @@ fn paint_shadow(canvas: &mut Canvas, bb: Rect, radii: [(f32, f32); 4], s: &Shado
 }
 
 
-fn paint_box(canvas: &mut Canvas, b: &LayoutBox, imgs: &img::Store) {
+fn paint_box(canvas: &mut Canvas, b: &LayoutBox, s: &Scene) {
     let op = computed(b).map(opacity_of).unwrap_or(1.0);
     if op < 1.0 {
         let mut scratch = Canvas::new_transparent(canvas.width, canvas.height);
-        paint_subtree(&mut scratch, b, imgs);
+        paint_subtree(&mut scratch, b, s);
         canvas.composite(&scratch, op);
         return;
     }
-    paint_subtree(canvas, b, imgs);
+    paint_subtree(canvas, b, s);
 }
 
-fn paint_subtree(canvas: &mut Canvas, b: &LayoutBox, imgs: &img::Store) {
+fn paint_subtree(canvas: &mut Canvas, b: &LayoutBox, s: &Scene) {
     let bb = b.dims.border_box();
     let radii = computed(b)
         .map(|m| radii_of(m, bb.width, bb.height))
@@ -829,8 +861,8 @@ fn paint_subtree(canvas: &mut Canvas, b: &LayoutBox, imgs: &img::Store) {
     for s in shadows.iter().rev() {
         paint_shadow(canvas, bb, radii, s);
     }
-    paint_bg(canvas, b, imgs);
-    paint_img(canvas, b, imgs);
+    paint_bg(canvas, b, s);
+    paint_img(canvas, b, s);
     let saved = canvas.clip;
     if clips(b) {
         let r = b.dims.padding_box();
@@ -839,22 +871,22 @@ fn paint_subtree(canvas: &mut Canvas, b: &LayoutBox, imgs: &img::Store) {
             None => r,
         });
     }
-    paint_abs_group(canvas, b, imgs, true);
-    paint_rel_group(canvas, b, imgs, true);
+    paint_abs_group(canvas, b, s, true);
+    paint_rel_group(canvas, b, s, true);
     paint_text(canvas, b);
-    paint_marker(canvas, b, imgs);
+    paint_marker(canvas, b, s);
     for child in &b.children {
         if !is_float(child) && z_rel(child).is_none() {
-            paint_box(canvas, child, imgs);
+            paint_box(canvas, child, s);
         }
     }
     for child in &b.children {
         if is_float(child) && z_rel(child).is_none() {
-            paint_box(canvas, child, imgs);
+            paint_box(canvas, child, s);
         }
     }
-    paint_abs_group(canvas, b, imgs, false);
-    paint_rel_group(canvas, b, imgs, false);
+    paint_abs_group(canvas, b, s, false);
+    paint_rel_group(canvas, b, s, false);
     canvas.clip = saved;
 }
 
@@ -871,7 +903,7 @@ fn z_rel(b: &LayoutBox) -> Option<i32> {
     Some(z_index(b))
 }
 
-fn paint_rel_group(canvas: &mut Canvas, b: &LayoutBox, imgs: &img::Store, below: bool) {
+fn paint_rel_group(canvas: &mut Canvas, b: &LayoutBox, s: &Scene, below: bool) {
     let mut idx: Vec<usize> = (0..b.children.len())
         .filter(|&i| {
             z_rel(&b.children[i])
@@ -881,17 +913,17 @@ fn paint_rel_group(canvas: &mut Canvas, b: &LayoutBox, imgs: &img::Store, below:
         .collect();
     idx.sort_by_key(|&i| z_rel(&b.children[i]).unwrap_or(0));
     for i in idx {
-        paint_box(canvas, &b.children[i], imgs);
+        paint_box(canvas, &b.children[i], s);
     }
 }
 
-fn paint_abs_group(canvas: &mut Canvas, b: &LayoutBox, imgs: &img::Store, below: bool) {
+fn paint_abs_group(canvas: &mut Canvas, b: &LayoutBox, s: &Scene, below: bool) {
     let mut idx: Vec<usize> = (0..b.abs.len())
         .filter(|&i| (z_index(&b.abs[i]) < 0) == below)
         .collect();
     idx.sort_by_key(|&i| z_index(&b.abs[i]));
     for i in idx {
-        paint_box(canvas, &b.abs[i], imgs);
+        paint_box(canvas, &b.abs[i], s);
     }
 }
 
@@ -928,7 +960,7 @@ fn paint_text(canvas: &mut Canvas, b: &LayoutBox) {
     canvas.text(b.dims.content.x, baseline, t, color, size);
 }
 
-fn paint_marker(canvas: &mut Canvas, b: &LayoutBox, imgs: &img::Store) {
+fn paint_marker(canvas: &mut Canvas, b: &LayoutBox, s: &Scene) {
     if b.marker.is_none() && b.marker_img.is_none() {
         return;
     }
@@ -945,7 +977,7 @@ fn paint_marker(canvas: &mut Canvas, b: &LayoutBox, imgs: &img::Store) {
     let baseline =
         b.dims.content.y + (lh - (font::asc(size) + font::desc(size))) / 2.0 + font::asc(size);
     if let Some(u) = b.marker_img {
-        if let Some(im) = imgs.get(u) {
+        if let Some(im) = s.frame(u) {
             canvas.image(
                 b.dims.content.x - 2.0 - im.width as f32,
                 baseline - im.height as f32,
@@ -1002,7 +1034,7 @@ fn text_metrics(map: Option<&std::collections::HashMap<String, Vec<Value>>>) -> 
     (size, lh)
 }
 
-fn paint_bg(canvas: &mut Canvas, b: &LayoutBox, imgs: &img::Store) {
+fn paint_bg(canvas: &mut Canvas, b: &LayoutBox, s: &Scene) {
     let d = &b.dims;
     let bb = d.border_box();
     let radii = computed(b)
@@ -1021,7 +1053,7 @@ fn paint_bg(canvas: &mut Canvas, b: &LayoutBox, imgs: &img::Store) {
             canvas.fill_gradient(bb, &g, radii);
         }
         if let Some(u) = bg_url(m) {
-            if let Some(im) = imgs.get(&u) {
+            if let Some(im) = s.frame(&u) {
                 let pb = d.padding_box();
                 let font = text_metrics(Some(m)).0;
                 let (rw, rh) = bg_size(
@@ -2207,6 +2239,104 @@ mod tests {
         assert_eq!(canvas.pixel(2, 2), [255, 0, 0]);
         assert_eq!(canvas.pixel(1, 2), [255, 255, 255]);
         assert_eq!(canvas.pixel(7, 7), [255, 255, 0]);
+    }
+
+    fn anim_pair() -> (img::Store, img::AnimStore) {
+        let mut imgs = img::Store::new();
+        imgs.insert(
+            "g.gif".into(),
+            img::Image {
+                width: 2,
+                height: 2,
+                data: vec![
+                    255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255,
+                ],
+            },
+        );
+        let mut anims = img::AnimStore::new();
+        anims.insert(
+            "g.gif".into(),
+            img::Anim {
+                width: 2,
+                height: 2,
+                frames: vec![
+                    img::Frame {
+                        image: img::Image {
+                            width: 2,
+                            height: 2,
+                            data: vec![
+                                255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255,
+                            ],
+                        },
+                        delay_ms: 100,
+                    },
+                    img::Frame {
+                        image: img::Image {
+                            width: 2,
+                            height: 2,
+                            data: vec![
+                                0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255,
+                            ],
+                        },
+                        delay_ms: 100,
+                    },
+                ],
+            },
+        );
+        (imgs, anims)
+    }
+
+    #[test]
+    fn gif_img_advances_with_timer() {
+        let dom =
+            parse_html("<html><body><img src=\"g.gif\" width=\"4\" height=\"4\"></body></html>");
+        let sheet = parse_css("img { image-rendering: pixelated }");
+        let styled = style_build(&dom, &sheet);
+        let (imgs, anims) = anim_pair();
+        let tree = layout_with(&styled, 50.0, &imgs).unwrap();
+        let c0 = paint_at(&tree, 50.0, &imgs, &anims, 0);
+        let c1 = paint_at(&tree, 50.0, &imgs, &anims, 100);
+        assert_eq!(c0.pixel(1, 1), [255, 0, 0]);
+        assert_eq!(c1.pixel(1, 1), [0, 0, 255]);
+        assert_eq!(c1.pixel(3, 3), [0, 0, 255]);
+        let cs = paint_with(&tree, 50.0, &imgs);
+        assert_eq!(cs.pixel(1, 1), [255, 0, 0]);
+    }
+
+    #[test]
+    fn gif_background_size_follows_frame() {
+        let dom = parse_html("<html><div></div></html>");
+        let sheet = parse_css(
+            "div { width: 8px; height: 8px; background: url(g.gif) no-repeat; background-size: 4px 4px; image-rendering: pixelated }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let (imgs, anims) = anim_pair();
+        let tree = layout(&styled, 100.0).unwrap();
+        let c0 = paint_at(&tree, 100.0, &imgs, &anims, 0);
+        let c1 = paint_at(&tree, 100.0, &imgs, &anims, 100);
+        assert_eq!(c0.pixel(0, 0), [255, 0, 0]);
+        assert_eq!(c0.pixel(3, 3), [255, 0, 0]);
+        assert_eq!(c0.pixel(4, 4), [255, 255, 255]);
+        assert_eq!(c1.pixel(0, 0), [0, 0, 255]);
+        assert_eq!(c1.pixel(3, 3), [0, 0, 255]);
+        assert_eq!(c1.pixel(4, 4), [255, 255, 255]);
+    }
+
+    #[test]
+    fn gif_background_cover_loops() {
+        let dom = parse_html("<html><div></div></html>");
+        let sheet = parse_css(
+            "div { width: 8px; height: 8px; background: url(g.gif) no-repeat; background-size: cover }",
+        );
+        let styled = style_build(&dom, &sheet);
+        let (imgs, anims) = anim_pair();
+        let tree = layout(&styled, 100.0).unwrap();
+        let c0 = paint_at(&tree, 100.0, &imgs, &anims, 0);
+        let c1 = paint_at(&tree, 100.0, &imgs, &anims, 150);
+        assert_eq!(c0.pixel(7, 7), [255, 0, 0]);
+        assert_eq!(c1.pixel(0, 0), [0, 0, 255]);
+        let c2 = paint_at(&tree, 100.0, &imgs, &anims, 400);
+        assert_eq!(c2.pixel(4, 4), [255, 0, 0]);
     }
 
     #[test]

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+#[derive(Clone)]
 pub struct Image {
     pub width: u32,
     pub height: u32,
@@ -47,6 +48,87 @@ pub struct Anim {
     pub width: u32,
     pub height: u32,
     pub frames: Vec<Frame>,
+}
+
+pub struct AnimStore {
+    map: HashMap<String, Anim>,
+}
+
+impl AnimStore {
+    pub fn new() -> AnimStore {
+        AnimStore {
+            map: HashMap::new(),
+        }
+    }
+
+    pub fn insert(&mut self, url: String, anim: Anim) {
+        self.map.insert(url, anim);
+    }
+
+    pub fn get(&self, url: &str) -> Option<&Anim> {
+        self.map.get(url)
+    }
+
+    pub fn duration(&self) -> u32 {
+        self.map.values().map(|a| a.duration()).max().unwrap_or(0)
+    }
+
+    pub fn next_tick(&self, now: u32) -> u32 {
+        self.map
+            .values()
+            .map(|a| a.step(now))
+            .filter(|d| *d > 0)
+            .min()
+            .unwrap_or(0)
+    }
+}
+
+const MIN_DELAY: u32 = 100;
+
+impl Anim {
+    fn delays(&self) -> Vec<u32> {
+        self.frames
+            .iter()
+            .map(|f| if f.delay_ms < MIN_DELAY { MIN_DELAY } else { f.delay_ms })
+            .collect()
+    }
+
+    pub fn duration(&self) -> u32 {
+        if self.frames.len() < 2 {
+            return 0;
+        }
+        self.delays().iter().sum()
+    }
+
+    pub fn frame_at(&self, t: u32) -> &Frame {
+        if self.frames.len() < 2 {
+            return &self.frames[0];
+        }
+        let d = self.delays();
+        let mut r = t % d.iter().sum::<u32>();
+        for (i, w) in d.iter().enumerate() {
+            if r < *w {
+                return &self.frames[i];
+            }
+            r -= *w;
+        }
+        &self.frames[0]
+    }
+
+    pub fn step(&self, t: u32) -> u32 {
+        if self.frames.len() < 2 {
+            return 0;
+        }
+        let d = self.delays();
+        let mut r = t % d.iter().sum::<u32>();
+        for w in &d {
+            if r < *w {
+                return w - r;
+            }
+            r -= *w;
+        }
+        1
+    }
 }
 
 pub fn decode(bytes: &[u8]) -> Option<Image> {
@@ -2632,5 +2714,69 @@ mod tests {
         cut.truncate(n - 4);
         assert!(decode(&cut).is_none());
         assert!(decode(&[]).is_none());
+    }
+
+    fn anim_of(delays: &[u32]) -> Anim {
+        let frames = delays
+            .iter()
+            .map(|&d| Frame {
+                image: Image {
+                    width: 1,
+                    height: 1,
+                    data: vec![0, 0, 0, 255],
+                },
+                delay_ms: d,
+            })
+            .collect();
+        Anim {
+            width: 1,
+            height: 1,
+            frames,
+        }
+    }
+
+    #[test]
+    fn anim_clock_loops() {
+        let a = anim_of(&[0, 250]);
+        assert_eq!(a.duration(), 350);
+        assert!(std::ptr::eq(a.frame_at(0), &a.frames[0]));
+        assert!(std::ptr::eq(a.frame_at(99), &a.frames[0]));
+        assert!(std::ptr::eq(a.frame_at(100), &a.frames[1]));
+        assert!(std::ptr::eq(a.frame_at(349), &a.frames[1]));
+        assert!(std::ptr::eq(a.frame_at(350), &a.frames[0]));
+        assert!(std::ptr::eq(a.frame_at(450), &a.frames[1]));
+        assert_eq!(a.step(0), 100);
+        assert_eq!(a.step(99), 1);
+        assert_eq!(a.step(100), 250);
+        assert_eq!(a.step(349), 1);
+        assert_eq!(a.step(350), 100);
+        let a = anim_of(&[300, 500]);
+        assert_eq!(a.duration(), 800);
+        assert!(std::ptr::eq(a.frame_at(299), &a.frames[0]));
+        assert!(std::ptr::eq(a.frame_at(300), &a.frames[1]));
+        assert_eq!(a.step(300), 500);
+    }
+
+    #[test]
+    fn anim_single_frame_is_static() {
+        let a = anim_of(&[0]);
+        assert_eq!(a.duration(), 0);
+        assert_eq!(a.step(0), 0);
+        assert_eq!(a.step(10000), 0);
+        assert!(std::ptr::eq(a.frame_at(9999), &a.frames[0]));
+    }
+
+    #[test]
+    fn anim_store_tick_is_min() {
+        let mut s = AnimStore::new();
+        assert_eq!(s.next_tick(0), 0);
+        s.insert("a".into(), anim_of(&[300, 300]));
+        s.insert("b".into(), anim_of(&[0]));
+        assert_eq!(s.next_tick(0), 300);
+        assert_eq!(s.next_tick(300), 300);
+        s.insert("c".into(), anim_of(&[100, 100]));
+        assert_eq!(s.next_tick(0), 100);
+        assert_eq!(s.duration(), 600);
+        assert_eq!(s.next_tick(100), 100);
     }
 }
