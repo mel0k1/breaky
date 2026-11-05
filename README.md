@@ -26,12 +26,15 @@ given time in seconds, honoring `transition` on either side. The `anim`
 command dumps every frame of an image (local path or URL) as numbered PNGs
 and prints each frame delay in milliseconds. The `animate` command renders a
 whole page on a timer, stepping every animated GIF at its frame delay, for a
-local file or a remote URL. Scripts in `<script>` tags (inline or `src`,
-local or remote) run in an embedded QuickJS engine and print through
-`console.log`. Scripts get live DOM bindings — `document.getElementById`,
-`document.body`, `innerHTML`, `textContent`, `getAttribute`/`setAttribute`
-and a `style` proxy for inline CSS properties — and mutations take effect
-before the page is styled, laid out and painted.
+local file or a remote URL. The `click` command finds an element by a CSS
+selector, fires its `onclick` handler and paints the result. Scripts in
+`<script>` tags (inline or `src`, local or remote) run in an embedded
+QuickJS engine and print through `console.log`. Scripts get live DOM
+bindings — `document.getElementById`, `document.body`, `querySelector`,
+`createElement`/`appendChild`, `innerHTML`, `textContent`,
+`getAttribute`/`setAttribute`, a `style` proxy for inline CSS properties
+and `onclick` handlers — and mutations take effect before the page is
+styled, laid out and painted.
 
 ## Architecture
 
@@ -112,6 +115,8 @@ Workspace of small crates:
 - [x] @font-face with deferred web fonts, per family metrics
 - [x] QuickJS scripting (`<script>` inline and src, console.log)
 - [x] DOM bindings (getElementById, innerHTML, textContent, attributes, inline styles)
+- [x] DOM construction (createElement, appendChild with node moving, querySelector)
+- [x] Events (onclick handlers, `breaky click <selector>` command)
 
 ## License
 

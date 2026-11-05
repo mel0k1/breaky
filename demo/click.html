@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>onclick</title>
+</head>
+<body>
+<h1>onclick</h1>
+<p id="msg">waiting for click</p>
+<button id="btn">go</button>
+<script>
+document.getElementById("btn").onclick = function () {
+  var msg = document.getElementById("msg");
+  msg.textContent = "clicked through the pipeline";
+  msg.style.color = "#aa2222";
+  msg.style["font-weight"] = "bold";
+};
+</script>
+</body>
+</html>

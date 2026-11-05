@@ -25,6 +25,10 @@ fn main() {
         animate_cmd(&args);
         return;
     }
+    if path == "click" {
+        click_cmd(&args);
+        return;
+    }
     if args.len() >= 6 {
         transition_page(&args);
         return;
@@ -72,6 +76,76 @@ fn main() {
                 fs::write(out, canvas.to_png()).unwrap_or_else(fail);
             }
         }
+    }
+}
+
+fn click_cmd(args: &[String]) {
+    let src = args.get(2).unwrap_or_else(|| usage());
+    let remote = src.contains("://");
+    let (si, vi, oi) = if remote { (3, 4, 5) } else { (4, 5, 6) };
+    let selector = args.get(si).unwrap_or_else(|| usage());
+    let viewport = args
+        .get(vi)
+        .and_then(|s| s.parse::<f32>().ok())
+        .unwrap_or(800.0);
+    let out = args.get(oi).map(|s| s.as_str()).unwrap_or("click.png");
+    let mut client = net::Client::new();
+    let (mut dom, css_text, base) = if remote {
+        let (b, d, c) = remote_page(&mut client, src);
+        (d, c, Some(b))
+    } else {
+        let html_text = fs::read_to_string(src).unwrap_or_else(fail);
+        let dom = html::parse(&html_text);
+        let mut css_text = args
+            .get(3)
+            .map(|p| fs::read_to_string(p).unwrap_or_else(fail))
+            .unwrap_or_default();
+        style::collect_css(&dom, &mut css_text);
+        (dom, css_text, None)
+    };
+    let sheet = css::parse(&css_text);
+    let mut scripts: Vec<Script> = Vec::new();
+    gather_scripts(&dom, &mut scripts);
+    let base_html = Path::new(src).parent().unwrap_or(Path::new("."));
+    let mut rt = match &base {
+        Some(b) => run_scripts(&scripts, &mut dom, Path::new("."), Some((&mut client, b))),
+        None => run_scripts(&scripts, &mut dom, base_html, None),
+    };
+    match style::query_first(&dom, selector) {
+        Some(p) => match rt.dispatch_click(&p) {
+            Ok(true) => {}
+            Ok(false) => eprintln!("{}: no onclick handler", selector),
+            Err(e) => eprintln!("{}", e),
+        },
+        None => eprintln!("{}: no match", selector),
+    }
+    let styled = build(&dom, &sheet);
+    let mut imgs = img::Store::new();
+    let mut anims = img::AnimStore::new();
+    let mut urls: Vec<String> = Vec::new();
+    gather_images(&styled, &mut urls);
+    let mut srcs: Vec<String> = Vec::new();
+    gather_dom_images(&dom, &mut srcs);
+    match &base {
+        Some(b) => {
+            load_remote_images(&mut client, &urls, b, &mut imgs, &mut anims);
+            load_remote_images(&mut client, &srcs, b, &mut imgs, &mut anims);
+            load_faces(&sheet, &styled, Path::new("."), Some((&mut client, b)));
+        }
+        None => {
+            let css_base = args
+                .get(3)
+                .map(|p| Path::new(p).parent().unwrap_or(Path::new(".")))
+                .unwrap_or(Path::new("."));
+            load_local_images(&urls, css_base, &mut imgs, &mut anims);
+            load_local_images(&srcs, base_html, &mut imgs, &mut anims);
+            load_faces(&sheet, &styled, css_base, None);
+        }
+    }
+    if let Some(tree) = layout::layout_with(&styled, viewport, &imgs) {
+        let canvas = render::paint_with(&tree, viewport, &imgs);
+        fs::write(out, canvas.to_png()).unwrap_or_else(fail);
+        println!("saved {}", out);
     }
 }
 
@@ -246,7 +320,7 @@ fn animate_cmd(args: &[String]) {
             Some((&mut client, b)),
         ),
         None => run_scripts(&scripts, &mut dom, base_html, None),
-    }
+    };
     let styled = build(&dom, &sheet);
     let mut imgs = img::Store::new();
     let mut anims = img::AnimStore::new();
@@ -343,10 +417,7 @@ fn run_scripts(
     dom: &mut Node,
     base: &Path,
     remote: Option<(&mut net::Client, &Url)>,
-) {
-    if scripts.is_empty() {
-        return;
-    }
+) -> js::Runtime {
     let (mut client, url_base) = match remote {
         Some((c, b)) => (Some(c), Some(b)),
         None => (None, None),
@@ -385,6 +456,7 @@ fn run_scripts(
             eprintln!("{}", e);
         }
     }
+    rt
 }
 
 fn load_faces(
@@ -630,5 +702,7 @@ fn usage() -> ! {
     eprintln!("       breaky anim <file|url> [prefix]");
     eprintln!("       breaky animate <file> [style.css] [width] [prefix]");
     eprintln!("       breaky animate <url> [width] [prefix]");
+    eprintln!("       breaky click <file> [style.css] <selector> [width] [out.png]");
+    eprintln!("       breaky click <url> <selector> [width] [out.png]");
     exit(2);
 }

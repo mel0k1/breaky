@@ -41,8 +41,19 @@ function el(p) {
       var np = __el_append(this.__path, cp, c || null);
       return np === null ? null : el(np);
     },
+    get onclick() {
+      return globalThis.__clicks[this.__path] || null;
+    },
+    set onclick(fn) {
+      if (typeof fn === "function") {
+        globalThis.__clicks[this.__path] = fn;
+      } else {
+        delete globalThis.__clicks[this.__path];
+      }
+    },
   };
 }
+globalThis.__clicks = {};
 globalThis.document = {
   getElementById: function(id) {
     var p = __doc_by_id(String(id));

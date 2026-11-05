@@ -1,0 +1,10 @@
+body {
+    font-family: sans-serif;
+    padding: 20px;
+}
+button {
+    padding: 8px 18px;
+}
+#msg {
+    color: #24435c;
+}

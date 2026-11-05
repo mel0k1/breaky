@@ -9,8 +9,8 @@ use super::{
     JSContext, JSCFunction, JSValue, JSValueUnion, EVAL_GLOBAL,
 };
 use super::{
-    JS_Eval, JS_FreeCString, JS_GetContextOpaque, JS_GetException, JS_GetGlobalObject,
-    JS_NewCFunction2, JS_NewStringLen, JS_SetContextOpaque, JS_SetPropertyStr,
+    JS_Call, JS_Eval, JS_FreeCString, JS_GetContextOpaque, JS_GetException, JS_GetGlobalObject,
+    JS_GetPropertyStr, JS_NewCFunction2, JS_NewStringLen, JS_SetContextOpaque, JS_SetPropertyStr,
 };
 
 const BOOTSTRAP: &str = include_str!("bootstrap.js");
@@ -78,6 +78,37 @@ unsafe fn register(ctx: *mut JSContext, name: &str, f: JSCFunction) {
     let func = JS_NewCFunction2(ctx, f, cname.as_ptr(), 1, CFUNC_GENERIC, 0);
     JS_SetPropertyStr(ctx, global, cname.as_ptr(), func);
     breaky_free_value(ctx, global);
+}
+
+pub(super) fn dispatch_click(rt: &mut super::Runtime, path: &[usize]) -> Result<bool, String> {
+    let key = cstr(&encode_path(path));
+    let reg_name = cstr("__clicks");
+    unsafe {
+        let global = JS_GetGlobalObject(rt.ctx);
+        let reg = JS_GetPropertyStr(rt.ctx, global, reg_name.as_ptr());
+        breaky_free_value(rt.ctx, global);
+        if reg.tag == TAG_UNDEFINED || reg.tag == TAG_NULL {
+            breaky_free_value(rt.ctx, reg);
+            return Ok(false);
+        }
+        let f = JS_GetPropertyStr(rt.ctx, reg, key.as_ptr());
+        breaky_free_value(rt.ctx, reg);
+        if f.tag == TAG_UNDEFINED || f.tag == TAG_NULL {
+            breaky_free_value(rt.ctx, f);
+            return Ok(false);
+        }
+        let r = JS_Call(rt.ctx, f, js_undefined(), 0, std::ptr::null());
+        breaky_free_value(rt.ctx, f);
+        if breaky_is_exception(r) != 0 {
+            let e = JS_GetException(rt.ctx);
+            let msg = to_string(rt.ctx, e);
+            breaky_free_value(rt.ctx, e);
+            Err(msg)
+        } else {
+            breaky_free_value(rt.ctx, r);
+            Ok(true)
+        }
+    }
 }
 
 unsafe fn opaque(ctx: *mut JSContext) -> &'static mut DomState {
@@ -1007,5 +1038,63 @@ mod tests {
             rt.eval("document.querySelector('###') === null").unwrap(),
             "true"
         );
+    }
+
+    #[test]
+    fn onclick_dispatch_mutates_dom() {
+        let mut dom = tree();
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        rt.eval(
+            "document.getElementById('a').onclick = function () { document.getElementById('a').textContent = 'clicked' }",
+        )
+        .unwrap();
+        assert_eq!(
+            rt.eval("typeof document.getElementById('a').onclick").unwrap(),
+            "function"
+        );
+        let path = find_first(&dom, &|n| has_id(n, "a"), &mut Vec::new()).unwrap();
+        assert_eq!(rt.dispatch_click(&path).unwrap(), true);
+        assert_eq!(
+            by_id(&dom, "a").children,
+            vec![Node::new(NodeKind::Text("clicked".into()))]
+        );
+    }
+
+    #[test]
+    fn onclick_missing_handler_is_noop() {
+        let mut dom = tree();
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        let path = find_first(&dom, &|n| has_id(n, "a"), &mut Vec::new()).unwrap();
+        assert_eq!(rt.dispatch_click(&path).unwrap(), false);
+    }
+
+    #[test]
+    fn onclick_clears_on_null() {
+        let mut dom = tree();
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        rt.eval("document.getElementById('a').onclick = function () {}")
+            .unwrap();
+        rt.eval("document.getElementById('a').onclick = null")
+            .unwrap();
+        assert_eq!(
+            rt.eval("document.getElementById('a').onclick === null").unwrap(),
+            "true"
+        );
+        let path = find_first(&dom, &|n| has_id(n, "a"), &mut Vec::new()).unwrap();
+        assert_eq!(rt.dispatch_click(&path).unwrap(), false);
+    }
+
+    #[test]
+    fn onclick_handler_error_is_reported() {
+        let mut dom = tree();
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        rt.eval("document.getElementById('a').onclick = function () { null.foo }")
+            .unwrap();
+        let path = find_first(&dom, &|n| has_id(n, "a"), &mut Vec::new()).unwrap();
+        assert!(rt.dispatch_click(&path).unwrap_err().contains("TypeError"));
     }
 }

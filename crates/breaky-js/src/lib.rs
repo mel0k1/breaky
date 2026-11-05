@@ -53,8 +53,16 @@ extern "C" {
         prop: *const c_char,
         val: JSValue,
     ) -> c_int;
+    fn JS_GetPropertyStr(ctx: *mut JSContext, obj: JSValue, prop: *const c_char) -> JSValue;
     fn JS_GetContextOpaque(ctx: *mut JSContext) -> *mut c_void;
     fn JS_SetContextOpaque(ctx: *mut JSContext, opaque: *mut c_void);
+    fn JS_Call(
+        ctx: *mut JSContext,
+        f: JSValue,
+        this: JSValue,
+        argc: c_int,
+        argv: *const JSValue,
+    ) -> JSValue;
     fn JS_Eval(
         ctx: *mut JSContext,
         input: *const c_char,
@@ -100,6 +108,10 @@ impl Runtime {
 
     pub fn bind_dom(&mut self, root: &mut Node) {
         dom::install(self, root);
+    }
+
+    pub fn dispatch_click(&mut self, path: &[usize]) -> Result<bool, String> {
+        dom::dispatch_click(self, path)
     }
 
     pub fn eval(&mut self, src: &str) -> Result<String, String> {
