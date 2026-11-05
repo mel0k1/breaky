@@ -80,12 +80,12 @@ fn build_rec<'a>(
             matched.sort_by_key(|(spec, i, _)| (*spec, *i));
             for (_, _, rule) in &matched {
                 for d in &rule.declarations {
-                    computed.insert(d.name.clone(), d.value.clone());
+                    apply_decl(&mut computed, &d.name, d.value.clone());
                 }
             }
             if let Some(s) = attr(node, "style") {
                 for d in css::declarations(s) {
-                    computed.insert(d.name, d.value);
+                    apply_decl(&mut computed, &d.name, d.value);
                 }
             }
             if matches!(node.name(), Some("pre") | Some("textarea"))
@@ -187,6 +187,18 @@ fn build_rec<'a>(
     }
 }
 
+fn apply_decl(computed: &mut HashMap<String, Vec<Value>>, name: &str, value: Vec<Value>) {
+    if name == "gap" {
+        let mut vals = value.into_iter();
+        if let Some(row) = vals.next() {
+            computed.insert("row-gap".to_string(), vec![row.clone()]);
+            computed.insert("column-gap".to_string(), vec![vals.next().unwrap_or(row)]);
+        }
+        return;
+    }
+    computed.insert(name.to_string(), value);
+}
+
 fn pseudo_of(s: &Selector) -> Option<&str> {
     let last = s.compounds.last()?.last()?;
     match last {
@@ -250,7 +262,7 @@ fn pseudo_node<'a>(
     let decls = pseudo_rules(node, sheet, ancestors, kind)?;
     let mut computed = HashMap::new();
     for d in &decls {
-        computed.insert(d.name.clone(), d.value.clone());
+        apply_decl(&mut computed, &d.name, d.value.clone());
     }
     if sel {
         let sdecls = pseudo_rules(node, sheet, ancestors, "selection").unwrap_or_default();
@@ -346,7 +358,7 @@ fn insert_letter<'a>(
                 let rest = src[byte_i + ch.len_utf8()..].to_string();
                 let mut computed = children[idx].computed.clone();
                 for d in decls {
-                    computed.insert(d.name.clone(), d.value.clone());
+                    apply_decl(&mut computed, &d.name, d.value.clone());
                 }
                 let font = match computed.get("font-size").and_then(|v| v.first()) {
                     Some(Value::Length(n, Unit::Px)) => *n,
@@ -855,6 +867,37 @@ mod tests {
         let p = el(el(&s, "div"), "p");
         assert_eq!(p.computed["color"], vec![rgb(0, 0, 255)]);
         assert_eq!(el(&s, "div").computed["color"], vec![rgb(255, 0, 0)]);
+    }
+
+    #[test]
+    fn gap_expands_to_longhands() {
+        let dom = parse_html("<div style=\"gap: 5px 10px\">t</div>");
+        let sheet = parse_css("");
+        let s = build(&dom, &sheet);
+        let d = el(&s, "div");
+        assert_eq!(d.computed["row-gap"], vec![px(5.0)]);
+        assert_eq!(d.computed["column-gap"], vec![px(10.0)]);
+        assert!(!d.computed.contains_key("gap"));
+    }
+
+    #[test]
+    fn gap_longhand_overrides_after_shorthand() {
+        let dom = parse_html("<div style=\"gap: 5px; row-gap: 15px\">t</div>");
+        let sheet = parse_css("div { gap: 20px 30px }");
+        let s = build(&dom, &sheet);
+        let d = el(&s, "div");
+        assert_eq!(d.computed["row-gap"], vec![px(15.0)]);
+        assert_eq!(d.computed["column-gap"], vec![px(5.0)]);
+    }
+
+    #[test]
+    fn gap_single_value_sets_both() {
+        let dom = parse_html("<div>t</div>");
+        let sheet = parse_css("div { gap: 7px }");
+        let s = build(&dom, &sheet);
+        let d = el(&s, "div");
+        assert_eq!(d.computed["row-gap"], vec![px(7.0)]);
+        assert_eq!(d.computed["column-gap"], vec![px(7.0)]);
     }
 
     #[test]

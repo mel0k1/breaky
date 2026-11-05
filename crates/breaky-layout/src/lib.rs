@@ -1390,27 +1390,13 @@ impl<'a> LayoutBox<'a> {
             Some(e) => e,
             None => return (0.0, 0.0),
         };
-        let mut row = el
-            .computed
-            .get("row-gap")
-            .and_then(|v| v.first())
-            .and_then(|v| len_or(v, font, base));
-        let mut col = el
-            .computed
-            .get("column-gap")
-            .and_then(|v| v.first())
-            .and_then(|v| len_or(v, font, base));
-        if let Some(vals) = el.computed.get("gap") {
-            let g: Vec<f32> = vals.iter().filter_map(|v| len_or(v, font, base)).collect();
-            if g.len() == 1 {
-                row = Some(g[0]);
-                col = Some(g[0]);
-            } else if g.len() >= 2 {
-                row = Some(g[0]);
-                col = Some(g[1]);
-            }
-        }
-        (row.unwrap_or(0.0), col.unwrap_or(0.0))
+        let g = |key: &str| {
+            el.computed
+                .get(key)
+                .and_then(|v| v.first())
+                .and_then(|v| len_or(v, font, base))
+        };
+        (g("row-gap").unwrap_or(0.0), g("column-gap").unwrap_or(0.0))
     }
 
     fn flex_row(
@@ -4456,6 +4442,30 @@ mod tests {
         let f = find(&root, "div");
         assert!(eq(f.children[1].dims.content.y, 30.0));
         assert!(eq(f.dims.content.height, 60.0));
+    }
+
+    #[test]
+    fn flex_gap_two_values() {
+        let dom = parse_html(
+            "<html><div style=\"display: flex; gap: 6px 12px\"><p style=\"width: 40px\">a</p><p style=\"width: 40px\">b</p></div></html>",
+        );
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let div = find(&root, "div");
+        assert!(eq(div.children[1].dims.content.x, 52.0));
+    }
+
+    #[test]
+    fn flex_gap_row_gap_overrides_shorthand() {
+        let dom = parse_html(
+            "<html><div style=\"display: flex; flex-direction: column; gap: 10px 4px; row-gap: 2px\"><p style=\"height: 20px\">a</p><p style=\"height: 20px\">b</p></div></html>",
+        );
+        let sheet = parse_css("");
+        let styled = style_build(&dom, &sheet);
+        let root = layout(&styled, 200.0).unwrap();
+        let div = find(&root, "div");
+        assert!(eq(div.children[1].dims.content.y, 22.0));
     }
 
     #[test]

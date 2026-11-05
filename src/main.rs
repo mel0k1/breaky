@@ -118,30 +118,15 @@ fn fetch(args: &[String]) {
         .and_then(|s| s.parse::<f32>().ok())
         .unwrap_or(800.0);
     let out = args.get(4).map(|s| s.as_str()).unwrap_or("page.png");
-    let base = net::parse_url(url).unwrap_or_else(|e| {
-        eprintln!("{}", e);
-        exit(1);
-    });
     let mut client = net::Client::new();
-    let resp = client.get(url).unwrap_or_else(|e| {
-        eprintln!("{}", e);
-        exit(1);
-    });
-    if resp.status != 200 {
-        eprintln!("HTTP {}", resp.status);
-        exit(1);
-    }
-    let src = String::from_utf8_lossy(&resp.body).into_owned();
-    let dom = html::parse(&src);
+    let (base, dom, css_text) = remote_page(&mut client, url);
     html::print_tree(&dom, 0);
-    let mut css_text = String::new();
-    collect_links(&mut client, &dom, &base, &mut css_text);
-    style::collect_css(&dom, &mut css_text);
     let sheet = css::parse(&css_text);
     let styled = build(&dom, &sheet);
     println!();
     print_styled(&styled, 0);
     let mut imgs = img::Store::new();
+    let mut anims = img::AnimStore::new();
     let mut urls: Vec<String> = Vec::new();
     gather_images(&styled, &mut urls);
     let mut srcs: Vec<String> = Vec::new();
@@ -151,7 +136,7 @@ fn fetch(args: &[String]) {
             urls.push(s);
         }
     }
-    load_remote_images(&mut client, &urls, &base, &mut imgs);
+    load_remote_images(&mut client, &urls, &base, &mut imgs, &mut anims);
     if let Some(tree) = layout::layout_with(&styled, viewport, &imgs) {
         println!();
         layout::print_tree(&tree, 0);
@@ -159,6 +144,26 @@ fn fetch(args: &[String]) {
         fs::write(out, canvas.to_png()).unwrap_or_else(fail);
         println!("saved {}", out);
     }
+}
+
+fn remote_page(client: &mut net::Client, url: &str) -> (Url, Node, String) {
+    let base = net::parse_url(url).unwrap_or_else(|e| {
+        eprintln!("{}", e);
+        exit(1);
+    });
+    let resp = client.get(url).unwrap_or_else(|e| {
+        eprintln!("{}", e);
+        exit(1);
+    });
+    if resp.status != 200 {
+        eprintln!("HTTP {}", resp.status);
+        exit(1);
+    }
+    let dom = html::parse(&String::from_utf8_lossy(&resp.body));
+    let mut css_text = String::new();
+    collect_links(client, &dom, &base, &mut css_text);
+    style::collect_css(&dom, &mut css_text);
+    (base, dom, css_text)
 }
 
 fn anim_cmd(args: &[String]) {
@@ -192,38 +197,55 @@ fn anim_cmd(args: &[String]) {
 
 fn animate_cmd(args: &[String]) {
     let src = args.get(2).unwrap_or_else(|| usage());
+    let remote = src.contains("://");
+    let (vi, pi) = if remote { (3, 4) } else { (4, 5) };
     let viewport = args
-        .get(4)
+        .get(vi)
         .and_then(|s| s.parse::<f32>().ok())
         .unwrap_or(800.0);
-    let prefix = args.get(5).map(|s| s.as_str()).unwrap_or("frame");
-    let html_text = fs::read_to_string(src).unwrap_or_else(fail);
-    let dom = html::parse(&html_text);
-    let mut css_text = String::new();
-    if let Some(p) = args.get(3).filter(|p| !p.is_empty()) {
-        css_text = fs::read_to_string(p).unwrap_or_else(fail);
-    }
-    style::collect_css(&dom, &mut css_text);
+    let prefix = args.get(pi).map(|s| s.as_str()).unwrap_or("frame");
+    let mut client = net::Client::new();
+    let (dom, css_text, base) = if remote {
+        let (b, d, c) = remote_page(&mut client, src);
+        (d, c, Some(b))
+    } else {
+        let html_text = fs::read_to_string(src).unwrap_or_else(fail);
+        let dom = html::parse(&html_text);
+        let mut css_text = String::new();
+        if let Some(p) = args.get(3).filter(|p| !p.is_empty()) {
+            css_text = fs::read_to_string(p).unwrap_or_else(fail);
+        }
+        style::collect_css(&dom, &mut css_text);
+        (dom, css_text, None)
+    };
     let sheet = css::parse(&css_text);
     let styled = build(&dom, &sheet);
     let mut imgs = img::Store::new();
     let mut anims = img::AnimStore::new();
     let mut urls: Vec<String> = Vec::new();
     gather_images(&styled, &mut urls);
-    let base_css = args
-        .get(3)
-        .filter(|p| !p.is_empty())
-        .map(|p| Path::new(p).parent().unwrap_or(Path::new(".")));
-    load_local_images(
-        &urls,
-        base_css.unwrap_or(Path::new(".")),
-        &mut imgs,
-        &mut anims,
-    );
     let mut srcs: Vec<String> = Vec::new();
     gather_dom_images(&dom, &mut srcs);
-    let base_html = Path::new(src).parent().unwrap_or(Path::new("."));
-    load_local_images(&srcs, base_html, &mut imgs, &mut anims);
+    match base {
+        Some(b) => {
+            load_remote_images(&mut client, &urls, &b, &mut imgs, &mut anims);
+            load_remote_images(&mut client, &srcs, &b, &mut imgs, &mut anims);
+        }
+        None => {
+            let base_css = args
+                .get(3)
+                .filter(|p| !p.is_empty())
+                .map(|p| Path::new(p).parent().unwrap_or(Path::new(".")));
+            load_local_images(
+                &urls,
+                base_css.unwrap_or(Path::new(".")),
+                &mut imgs,
+                &mut anims,
+            );
+            let base_html = Path::new(src).parent().unwrap_or(Path::new("."));
+            load_local_images(&srcs, base_html, &mut imgs, &mut anims);
+        }
+    }
     let tree = match layout::layout_with(&styled, viewport, &imgs) {
         Some(t) => t,
         None => {
@@ -347,13 +369,21 @@ fn load_remote_images(
     client: &mut net::Client,
     urls: &[String],
     base: &Url,
-    store: &mut img::Store,
+    imgs: &mut img::Store,
+    anims: &mut img::AnimStore,
 ) {
     for u in urls {
         match net::resolve(base, u) {
             Ok(full) => match client.get_url(&full) {
-                Ok(resp) if resp.status == 200 => match img::decode(&resp.body) {
-                    Some(im) => store.insert(u.clone(), im),
+                Ok(resp) if resp.status == 200 => match img::decode_anim(&resp.body) {
+                    Some(a) => {
+                        if let Some(f) = a.frames.first() {
+                            imgs.insert(u.clone(), f.image.clone());
+                        }
+                        if a.frames.len() > 1 {
+                            anims.insert(u.clone(), a);
+                        }
+                    }
                     None => eprintln!("{}: unsupported image", u),
                 },
                 Ok(resp) => eprintln!("HTTP {} for {}", resp.status, full),
@@ -439,5 +469,6 @@ fn usage() -> ! {
     eprintln!("       breaky fetch <url> [width] [out.png]");
     eprintln!("       breaky anim <file|url> [prefix]");
     eprintln!("       breaky animate <file> [style.css] [width] [prefix]");
+    eprintln!("       breaky animate <url> [width] [prefix]");
     exit(2);
 }
