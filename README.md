@@ -31,10 +31,11 @@ selector, fires its `onclick` handler and paints the result. Scripts in
 `<script>` tags (inline or `src`, local or remote) run in an embedded
 QuickJS engine and print through `console.log`. Scripts get live DOM
 bindings — `document.getElementById`, `document.body`, `querySelector`,
-`createElement`/`appendChild`, `innerHTML`, `textContent`,
-`getAttribute`/`setAttribute`, a `style` proxy for inline CSS properties
-and `onclick` handlers — and mutations take effect before the page is
-styled, laid out and painted.
+`createElement`/`appendChild`, `insertBefore`/`removeChild`, `innerHTML`,
+`textContent`, `getAttribute`/`setAttribute`, a `style` proxy for inline CSS
+properties and `onclick` handlers — and mutations take effect before the page
+is styled, laid out and painted. Element wrappers keep pointing at their nodes
+across tree mutations, and `onclick` handlers survive moves and reindexing.
 
 ## Architecture
 
@@ -115,7 +116,7 @@ Workspace of small crates:
 - [x] @font-face with deferred web fonts, per family metrics
 - [x] QuickJS scripting (`<script>` inline and src, console.log)
 - [x] DOM bindings (getElementById, innerHTML, textContent, attributes, inline styles)
-- [x] DOM construction (createElement, appendChild with node moving, querySelector)
+- [x] DOM construction (createElement, appendChild, insertBefore, removeChild, querySelector, stable wrappers across mutations)
 - [x] Events (onclick handlers, `breaky click <selector>` command)
 
 ## License

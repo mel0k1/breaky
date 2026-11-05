@@ -33,6 +33,8 @@ const FUNCTIONS: &[(&str, JSCFunction)] = &[
     ("__el_attr", el_attr),
     ("__el_set_attr", el_set_attr),
     ("__el_append", el_append),
+    ("__el_insert", el_insert),
+    ("__el_remove", el_remove),
     ("__el_html", el_html),
     ("__el_set_html", el_set_html),
     ("__el_text", el_text),
@@ -190,6 +192,79 @@ fn slot_key(s: &Slot) -> String {
     }
 }
 
+fn same_container(a: &Slot, b: &Slot) -> bool {
+    match (a, b) {
+        (Slot::Tree(_), Slot::Tree(_)) => true,
+        (
+            Slot::Parked { slot: s1, .. },
+            Slot::Parked { slot: s2, .. },
+        ) => s1 == s2,
+        _ => false,
+    }
+}
+
+fn segments(s: &Slot) -> &[usize] {
+    match s {
+        Slot::Tree(p) => p,
+        Slot::Parked { inner, .. } => inner,
+    }
+}
+
+fn is_inside(anc: &Slot, desc: &Slot) -> bool {
+    if !same_container(anc, desc) {
+        return false;
+    }
+    let (a, d) = (segments(anc), segments(desc));
+    d.len() >= a.len() && d[..a.len()] == a[..]
+}
+
+fn direct_child(parent: &Slot, child: &Slot) -> Option<usize> {
+    if !same_container(parent, child) {
+        return None?;
+    }
+    let (p, c) = (segments(parent), segments(child));
+    if c.len() == p.len() + 1 && c[..p.len()] == p[..] {
+        Some(c[p.len()])
+    } else {
+        None
+    }
+}
+
+fn park(st: &mut DomState, node: Node) -> usize {
+    let slot = match st.parking.iter().position(|s| s.is_none()) {
+        Some(i) => i,
+        None => {
+            st.parking.push(None);
+            st.parking.len() - 1
+        }
+    };
+    st.parking[slot] = Some(node);
+    slot
+}
+
+fn shift_key(key: &str, parent: &str, idx: usize, up: bool) -> Option<String> {
+    if key == parent {
+        return None;
+    }
+    let prefix = format!("{}.", parent);
+    let rel = key.strip_prefix(&prefix)?;
+    let dot = rel.find('.');
+    let (head, tail) = match dot {
+        Some(d) => (&rel[..d], Some(&rel[d..])),
+        None => (rel, None),
+    };
+    let k = head.parse::<usize>().ok()?;
+    let hit = if up { k >= idx } else { k > idx };
+    if !hit {
+        return None;
+    }
+    let nk = if up { k + 1 } else { k - 1 };
+    match tail {
+        Some(t) => Some(format!("{}.{}{}", parent, nk, t)),
+        None => Some(format!("{}.{}", parent, nk)),
+    }
+}
+
 fn resolve_mut<'a>(root: &'a mut Node, path: &[usize]) -> Option<&'a mut Node> {
     let mut cur = root;
     for &i in path {
@@ -270,25 +345,62 @@ fn take_child(st: &mut DomState, cs: &Slot) -> Option<Node> {
     }
 }
 
-fn append(st: &mut DomState, ps: Slot, cs: Slot) -> Option<(String, Option<String>)> {
-    let mut parent = ps;
-    let mut moved_parent: Option<String> = None;
-    if let (Slot::Tree(ref ppath), Slot::Tree(cpath)) = (&parent, &cs) {
-        if ppath.len() >= cpath.len() && ppath[..cpath.len()] == cpath[..] {
-            return None;
-        }
-        let d = cpath.len() - 1;
-        if ppath.len() > d && ppath[..d] == cpath[..d] && ppath[d] > cpath[d] {
-            let mut fixed = ppath.clone();
-            fixed[d] -= 1;
-            moved_parent = Some(encode_path(&fixed));
-            parent = Slot::Tree(fixed);
+fn insert_ops(st: &mut DomState, pp: Slot, cs: Slot, refp: &str) -> Option<String> {
+    if is_inside(&cs, &pp) {
+        return None;
+    }
+    let pkey = slot_key(&pp);
+    let ckey = slot_key(&cs);
+    let ref_idx = if refp.is_empty() {
+        None
+    } else {
+        let rs = decode_path(refp)?;
+        Some(direct_child(&pp, &rs)?)
+    };
+    let cp_in_pp = direct_child(&pp, &cs);
+    let node = take_child(st, &cs)?;
+    let mut at = pkey.clone();
+    if let Slot::Tree(_) = cs {
+        if let Some(fixed) = shift_key(&pkey, &parent_key(&ckey), last_seg(&ckey), false) {
+            at = fixed;
         }
     }
-    let node = take_child(st, &cs)?;
-    let idx = owner_mut(st, &parent)?.children.len();
-    owner_mut(st, &parent)?.children.push(node);
-    Some((format!("{}.{}", slot_key(&parent), idx), moved_parent))
+    let ps = decode_path(&at)?;
+    let owner = owner_mut(st, &ps)?;
+    if !matches!(owner.kind, NodeKind::Element { .. }) {
+        return None;
+    }
+    let mut j = match ref_idx {
+        Some(j) => j,
+        None => owner.children.len(),
+    };
+    if let (Some(rj), Some(ci)) = (ref_idx, cp_in_pp) {
+        if ci < rj {
+            j -= 1;
+        }
+    }
+    if j > owner.children.len() {
+        return None;
+    }
+    owner.children.insert(j, node);
+    Some(format!(
+        "{{\"ops\":[{{\"take\":\"{}\"}},{{\"put\":{{\"at\":\"{}\",\"index\":{}}}}}]}}",
+        ckey, at, j
+    ))
+}
+
+fn parent_key(key: &str) -> String {
+    match key.rfind('.') {
+        Some(d) => key[..d].to_string(),
+        None => String::new(),
+    }
+}
+
+fn last_seg(key: &str) -> usize {
+    match key.rfind('.') {
+        Some(d) => key[d + 1..].parse().unwrap_or(0),
+        None => key.parse().unwrap_or(0),
+    }
 }
 
 fn text_content(node: &Node, out: &mut String) {
@@ -429,7 +541,44 @@ unsafe extern "C" fn doc_query(
 
 unsafe extern "C" fn el_append(
     ctx: *mut JSContext,
-    this: JSValue,
+    _this: JSValue,
+    argc: c_int,
+    argv: *const JSValue,
+) -> JSValue {
+    mutate(ctx, argc, argv, "")
+}
+
+unsafe extern "C" fn el_insert(
+    ctx: *mut JSContext,
+    _this: JSValue,
+    argc: c_int,
+    argv: *const JSValue,
+) -> JSValue {
+    let refp = arg(ctx, argc, argv, 2);
+    mutate(ctx, argc, argv, &refp)
+}
+
+unsafe fn mutate(ctx: *mut JSContext, argc: c_int, argv: *const JSValue, refp: &str) -> JSValue {
+    let st = opaque(ctx);
+    let pp = arg(ctx, argc, argv, 0);
+    let cp = arg(ctx, argc, argv, 1);
+    let ps = match decode_path(&pp) {
+        Some(s) => s,
+        None => return js_null(),
+    };
+    let cs = match decode_path(&cp) {
+        Some(s) => s,
+        None => return js_null(),
+    };
+    match insert_ops(st, ps, cs, refp) {
+        Some(json) => js_string(ctx, &json),
+        None => js_null(),
+    }
+}
+
+unsafe extern "C" fn el_remove(
+    ctx: *mut JSContext,
+    _this: JSValue,
     argc: c_int,
     argv: *const JSValue,
 ) -> JSValue {
@@ -444,25 +593,20 @@ unsafe extern "C" fn el_append(
         Some(s) => s,
         None => return js_null(),
     };
-    let Some((child_path, parent_fix)) = append(st, ps, cs) else {
+    if direct_child(&ps, &cs).is_none() {
         return js_null();
+    }
+    let ckey = slot_key(&cs);
+    let node = match take_child(st, &cs) {
+        Some(n) => n,
+        None => return js_null(),
     };
-    if argc >= 3 {
-        set_path_prop(ctx, *argv.add(2), &child_path);
-    }
-    if let Some(fixed) = parent_fix {
-        set_path_prop(ctx, this, &fixed);
-    }
-    js_string(ctx, &child_path)
-}
-
-unsafe fn set_path_prop(ctx: *mut JSContext, obj: JSValue, path: &str) {
-    if obj.tag == TAG_NULL || obj.tag == TAG_UNDEFINED {
-        return;
-    }
-    let key = cstr("__path");
-    let val = js_string(ctx, path);
-    JS_SetPropertyStr(ctx, obj, key.as_ptr(), val);
+    let slot = park(st, node);
+    let json = format!(
+        "{{\"ops\":[{{\"take\":\"{}\",\"park\":\"!{}\"}}]}}",
+        ckey, slot
+    );
+    js_string(ctx, &json)
 }
 
 unsafe extern "C" fn el_tag(
@@ -1096,5 +1240,199 @@ mod tests {
             .unwrap();
         let path = find_first(&dom, &|n| has_id(n, "a"), &mut Vec::new()).unwrap();
         assert!(rt.dispatch_click(&path).unwrap_err().contains("TypeError"));
+    }
+
+    #[test]
+    fn insert_before_orders_children() {
+        let mut dom = tree();
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        rt.eval(
+            "var d = document.createElement('div'); document.body.insertBefore(d, document.getElementById('b'))",
+        )
+        .unwrap();
+        let body = by_name(&dom, "body");
+        assert_eq!(body.children.len(), 3);
+        assert_eq!(body.children[0].name(), Some("p"));
+        assert_eq!(body.children[1].name(), Some("div"));
+        assert_eq!(body.children[2].name(), Some("p"));
+        assert!(has_id(&body.children[2], "b"));
+    }
+
+    #[test]
+    fn insert_before_null_ref_appends() {
+        let mut dom = tree();
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        rt.eval(
+            "document.body.insertBefore(document.createElement('hr'), null) !== null",
+        )
+        .unwrap();
+        let body = by_name(&dom, "body");
+        assert_eq!(body.children.len(), 3);
+        assert_eq!(body.children[2].name(), Some("hr"));
+    }
+
+    #[test]
+    fn insert_before_nonchild_ref_is_null() {
+        let mut dom = tree();
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        assert_eq!(
+            rt.eval(
+                "var h = document.createElement('hr'); document.body.insertBefore(h, document.createElement('i')) === null"
+            )
+            .unwrap(),
+            "true"
+        );
+        assert_eq!(by_name(&dom, "body").children.len(), 2);
+    }
+
+    #[test]
+    fn remove_child_parks_and_reinserts() {
+        let mut dom = tree();
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        assert_eq!(
+            rt.eval(
+                "var a = document.getElementById('a'); document.body.removeChild(a) === a"
+            )
+            .unwrap(),
+            "true"
+        );
+        assert_eq!(by_name(&dom, "body").children.len(), 1);
+        assert_eq!(
+            rt.eval("a.getAttribute('id')").unwrap(),
+            "a",
+            "detached node stays addressable"
+        );
+        rt.eval("a.textContent = 'back'").unwrap();
+        assert_eq!(
+            rt.eval("document.body.appendChild(a) === a").unwrap(),
+            "true"
+        );
+        let body = by_name(&dom, "body");
+        assert_eq!(body.children.len(), 2);
+        assert_eq!(
+            body.children[1].children,
+            vec![Node::new(NodeKind::Text("back".into()))]
+        );
+    }
+
+    #[test]
+    fn remove_child_nonchild_is_null() {
+        let mut dom = tree();
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        assert_eq!(
+            rt.eval(
+                "document.body.removeChild(document.createElement('i')) === null"
+            )
+            .unwrap(),
+            "true"
+        );
+        assert_eq!(by_name(&dom, "body").children.len(), 2);
+    }
+
+    #[test]
+    fn wrapper_paths_survive_insert_before() {
+        let mut dom = tree();
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        rt.eval("var b = document.getElementById('b')").unwrap();
+        rt.eval(
+            "document.body.insertBefore(document.createElement('div'), b)",
+        )
+        .unwrap();
+        rt.eval("b.textContent = 'still b'").unwrap();
+        let body = by_name(&dom, "body");
+        assert_eq!(body.children[1].name(), Some("div"));
+        assert_eq!(body.children[1].children.len(), 0, "div must stay empty");
+        assert_eq!(
+            body.children[2].children,
+            vec![Node::new(NodeKind::Text("still b".into()))]
+        );
+    }
+
+    #[test]
+    fn wrapper_paths_survive_remove() {
+        let mut dom = tree();
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        rt.eval("var b = document.getElementById('b')").unwrap();
+        rt.eval("document.body.removeChild(document.getElementById('a'))")
+            .unwrap();
+        rt.eval("b.textContent = 'kept'").unwrap();
+        let body = by_name(&dom, "body");
+        assert_eq!(body.children.len(), 1);
+        assert!(has_id(&body.children[0], "b"));
+        assert_eq!(
+            body.children[0].children,
+            vec![Node::new(NodeKind::Text("kept".into()))]
+        );
+    }
+
+    #[test]
+    fn click_registry_survives_insert_before() {
+        let mut dom = tree();
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        rt.eval(
+            "var b = document.getElementById('b'); b.onclick = function () { b.textContent = 'hit' }",
+        )
+        .unwrap();
+        rt.eval("document.body.insertBefore(document.createElement('div'), b)")
+            .unwrap();
+        let new_path = find_first(&dom, &|n| has_id(n, "b"), &mut Vec::new()).unwrap();
+        assert_eq!(rt.dispatch_click(&new_path).unwrap(), true);
+        assert_eq!(
+            by_id(&dom, "b").children,
+            vec![Node::new(NodeKind::Text("hit".into()))]
+        );
+    }
+
+    #[test]
+    fn insert_before_moves_within_parent() {
+        let mut dom = parse(
+            "<html><body><p id=\"a\">1</p><p id=\"b\">2</p><p id=\"c\">3</p></body></html>",
+        );
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        rt.eval("document.body.insertBefore(document.getElementById('c'), document.getElementById('a'))")
+            .unwrap();
+        let body = by_name(&dom, "body");
+        let ids: Vec<bool> = body
+            .children
+            .iter()
+            .map(|n| has_id(n, "c"))
+            .collect();
+        assert_eq!(ids, vec![true, false, false]);
+        assert_eq!(
+            rt.eval("document.body.textContent").unwrap(),
+            "312"
+        );
+    }
+
+    #[test]
+    fn append_into_moved_subtree_keeps_paths() {
+        let mut dom = parse(
+            "<html><body><div id=\"wrap\"><p id=\"x\">1</p></div><div id=\"end\"></div></body></html>",
+        );
+        let mut rt = Runtime::new();
+        rt.bind_dom(&mut dom);
+        rt.eval("var x = document.getElementById('x')").unwrap();
+        rt.eval("document.getElementById('end').appendChild(x)").unwrap();
+        rt.eval("x.textContent = 'moved'").unwrap();
+        let end = by_id(&dom, "end");
+        assert_eq!(
+            end.children[0].children,
+            vec![Node::new(NodeKind::Text("moved".into()))]
+        );
+        assert_eq!(by_id(&dom, "wrap").children.len(), 0);
+        rt.eval("x.textContent = 'again'").unwrap();
+        assert_eq!(
+            end.children[0].children,
+            vec![Node::new(NodeKind::Text("again".into()))]
+        );
     }
 }
